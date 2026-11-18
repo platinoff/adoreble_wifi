@@ -1,0 +1,12 @@
+[package]
+name = "adoreble-xtask"
+description = "Adoreble Wi-Fi — xtask tasks (echo: verify, fmt+clippy+test)"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "xtask"
+path = "src/main.rs"
+
+[dependencies]

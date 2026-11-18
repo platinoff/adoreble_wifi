@@ -1,0 +1,16 @@
+# Build artifacts
+/target
+**/*.rs.bk
+*.pdb
+
+# Local data / secrets (never commit)
+/data/*
+!/data/.gitkeep
+.env
+.env.*
+*.pem
+*.key
+
+# OS noise
+.DS_Store
+Thumbs.db

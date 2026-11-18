@@ -1,0 +1,12 @@
+[package]
+name = "adoreble-ui"
+description = "Adoreble Wi-Fi — WebAssembly/thin UI glue for the loopback control plane"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+wasm-bindgen = "0.2"

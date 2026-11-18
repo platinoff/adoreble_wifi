@@ -1,0 +1,11 @@
+[package]
+name = "adoreble-windows"
+description = "Adoreble Wi-Fi — Windows backend (WinRT TetheringManager, netsh, WlanApi)"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+serde.workspace = true
+adoreble-core = { path = "../adoreble-core" }
