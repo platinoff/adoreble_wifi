@@ -1,4 +1,4 @@
-//! `adoreble-wifi` — control binary (ADO-0 scaffold).
+//! `adoreble-wifi` — control binary (ADO-1: capability probes).
 
 use clap::{Parser, Subcommand};
 
@@ -11,7 +11,7 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
-    /// List Wi-Fi adapters and their capabilities (static probe for now).
+    /// List Wi-Fi adapters + drivers + tethering capability (JSON).
     Scan,
     /// Print the loopback API health JSON to stdout.
     Status,
@@ -25,10 +25,26 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     match cli.command {
         Command::Scan => {
             #[cfg(windows)]
-            let list = adoreble_windows::probe();
+            {
+                let ifaces = adoreble_windows::parse_interfaces(&capture_netsh(&[
+                    "wlan",
+                    "show",
+                    "interfaces",
+                ])?);
+                let drivers =
+                    adoreble_windows::parse_drivers(&capture_netsh(&["wlan", "show", "drivers"])?);
+                let tethering = adoreble_windows::probe_tethering();
+                let out = serde_json::json!({
+                    "interfaces": ifaces,
+                    "drivers": drivers,
+                    "tethering": tethering,
+                });
+                println!("{}", serde_json::to_string_pretty(&out)?);
+            }
             #[cfg(not(windows))]
-            let list = adoreble_linux::probe();
-            println!("{}", serde_json::to_string_pretty(&list)?);
+            {
+                println!("[]");
+            }
         }
         Command::Status => {
             let url = std::env::var("ADOREBLE_URL")
@@ -38,11 +54,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         Command::Version => {
             println!(
-                "adoreble-wifi {} (rustc {})\nlicense MIT · repository https://github.com/platinoff/adoreble_wifi",
-                env!("CARGO_PKG_VERSION"),
-                env!("CARGO_PKG_RUST_VERSION")
+                "adoreble-wifi {}\nlicense MIT · repository https://github.com/platinoff/adoreble_wifi",
+                env!("CARGO_PKG_VERSION")
             );
         }
     }
     Ok(())
+}
+
+#[cfg(windows)]
+fn capture_netsh(args: &[&str]) -> Result<String, Box<dyn std::error::Error>> {
+    let out = std::process::Command::new("netsh")
+        .args(args)
+        .stdout(std::process::Stdio::piped())
+        .output()?;
+    if !out.status.success() {
+        return Err(format!("netsh {} failed with {}", args.join(" "), out.status).into());
+    }
+    Ok(String::from_utf8_lossy(&out.stdout).to_string())
 }

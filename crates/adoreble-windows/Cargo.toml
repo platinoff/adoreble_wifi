@@ -9,3 +9,13 @@ repository.workspace = true
 [dependencies]
 serde.workspace = true
 adoreble-core = { path = "../adoreble-core" }
+
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.62", features = [
+  "Networking_Connectivity",
+  "Networking_NetworkOperators",
+  "Foundation",
+  "Foundation_Collections",
+  "Win32_System_Com",
+  "Win32_System_WinRT",
+] }
