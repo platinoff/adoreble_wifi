@@ -18,6 +18,13 @@ eagerly enabled.** ADO-3 (Hotspot) is viable on this host without new hardware.
 **Profiles currently visible to the host:** `BELL409` (current), `Bluetooth Network Connection`,
 `BunkeR_net`, `Mesh`, `MeshAlt`, `Annear` (+ others) — tethering capability enabled on all.
 
+## ADO-2 (2026-11-18, пізно)
+
+- `adoreble-wifi probe-hub` → read-only HTTP GET `/api/health` для кандидатів (LAN-first). На момент перевірки **hub не відповідає** (timeout ×2: `192.168.2.238` і `127.0.0.1`) — хаб падає від RAM; P0 власника.
+- `POST /api/probe-hub` (token-gated) на loopback API — те саме для UI/автоматизації.
+- Saved profiles знайдено через `netsh wlan show profiles` (parser у плагіні).
+- **Live-перемикання (`netsh wlan connect`) НЕ виконується** — тільки сухий план (`adoreble-wifi release`).ADO-3 потребує owner-gate.
+
 ## Rules
 
 - Nothing on this page was enabled or changed — probes are read-only WinRT/netsh calls.

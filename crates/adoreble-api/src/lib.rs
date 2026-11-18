@@ -12,7 +12,7 @@ use std::io::Write as IoWrite;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
-use adoreble_core::{AdapterCapabilities, Settings};
+use adoreble_core::{AdapterCapabilities, HubProbeResult, Settings};
 use axum::http::Request;
 use axum::{
     Json, Router,
@@ -67,6 +67,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/settings", get(get_settings))
         .route("/api/settings/stage", post(stage_settings))
         .route("/api/settings/apply", post(apply_settings))
+        .route("/api/probe-hub", post(probe_hub))
         .layer(middleware::from_fn_with_state(state.clone(), token_gate))
         .with_state(state)
 }
@@ -200,6 +201,72 @@ async fn apply_settings(State(state): State<AppState>) -> Response {
         Json(json!({"ok": true, "applied": true, "path": path})),
     )
         .into_response()
+}
+
+/// Optional body for `/api/probe-hub`: `{"candidates": [...]}`.
+#[derive(serde::Deserialize)]
+pub struct ProbeHubBody {
+    /// Override candidate URLs; empty/absent ⇒ settings' LAN-first list.
+    #[serde(default)]
+    pub candidates: Vec<String>,
+}
+
+/// Read-only probe of GSV hub candidates (HTTP GET `/api/health`).
+/// Never mutates host networking. Token-gated (POST).
+async fn probe_hub(
+    State(state): State<AppState>,
+    body: Option<axum::Json<ProbeHubBody>>,
+) -> Json<serde_json::Value> {
+    let urls = {
+        let s = state.settings.lock().unwrap();
+        match body {
+            Some(axum::Json(b)) if !b.candidates.is_empty() => b.candidates,
+            _ => s.gsv_hub_candidates.clone(),
+        }
+    };
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(2))
+        .build();
+    let results: Vec<HubProbeResult> = match client {
+        Ok(client) => {
+            let mut out = Vec::with_capacity(urls.len());
+            for url in urls {
+                let start = std::time::Instant::now();
+                let res = client.get(&url).send().await;
+                let latency_ms = start.elapsed().as_millis() as u64;
+                match res {
+                    Ok(resp) => {
+                        let status = resp.status();
+                        out.push(HubProbeResult {
+                            url,
+                            ok: status.is_success(),
+                            latency_ms,
+                            detail: format!("HTTP {status}"),
+                        });
+                    }
+                    Err(e) => {
+                        out.push(HubProbeResult {
+                            url,
+                            ok: false,
+                            latency_ms,
+                            detail: format!("{e}"),
+                        });
+                    }
+                }
+            }
+            out
+        }
+        Err(e) => urls
+            .into_iter()
+            .map(|url| HubProbeResult {
+                url,
+                ok: false,
+                latency_ms: 0,
+                detail: format!("client build: {e}"),
+            })
+            .collect(),
+    };
+    Json(json!({"ok": true, "results": results}))
 }
 
 /// Default data directory: `data/` under CWD (gitignored in this repo).

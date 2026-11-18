@@ -18,6 +18,7 @@ tokio = { workspace = true, features = ["rt-multi-thread"] }
 tracing.workspace = true
 tracing-subscriber.workspace = true
 rand = "0.8"
+reqwest = { version = "0.13", default-features = false, features = ["json", "http2", "native-tls"] }
 adoreble-core = { path = "../adoreble-core" }
 
 [target.'cfg(windows)'.dependencies]

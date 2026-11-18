@@ -146,6 +146,53 @@ pub struct TetheringProbe {
     pub error: Option<String>,
 }
 
+/// A saved Wi-Fi profile (`netsh wlan show profiles`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ProfileEntry {
+    pub name: String,
+    pub interface: Option<String>,
+    /// e.g. `WPA2-Local User` / `Open` / `WPA3-SAE` (raw string from netsh).
+    pub security: Option<String>,
+}
+
+/// Parse `netsh wlan show profiles` output.
+pub fn parse_profiles(output: &str) -> Vec<ProfileEntry> {
+    // Per-interface section blocks:
+    //   "Profiles on interface Wi-Fi:" / "Group policy profiles (read only)" ...
+    //   "    All User Profile     : BELL409"
+    let mut interface: Option<String> = None;
+    let mut out = Vec::new();
+    for line in output.lines() {
+        let line = line.trim_end();
+        if let Some(rest) = line.strip_prefix("Profiles on interface ") {
+            interface = Some(rest.trim_end_matches(':').trim().to_string());
+            continue;
+        }
+        if let Some((_, v)) = line.split_once(':') {
+            let k = line.split_once(':').map(|(k, _)| k.trim()).unwrap_or("");
+            if k == "All User Profile" {
+                let name = v.trim().to_string();
+                if !name.is_empty() {
+                    out.push(ProfileEntry {
+                        name,
+                        interface: interface.clone(),
+                        security: None,
+                    });
+                }
+            }
+        }
+    }
+    out
+}
+
+/// Extract the connected profile name from `netsh wlan show interfaces` output.
+pub fn current_profile_from_interfaces(output: &str) -> Option<String> {
+    parse_kv_lines(output)
+        .into_iter()
+        .find(|(k, _)| k == "Profile")
+        .map(|(_, v)| v)
+}
+
 /// Static placeholder capabilities for this dev box (ADO-0).
 /// ADO-1 replaces this with a real probe (tethering state, bands, WPA3).
 #[cfg(windows)]
@@ -329,6 +376,48 @@ Interface name: Wi-Fi
             vec!["802.11b", "802.11g", "802.11n", "802.11a"]
         );
         assert!(!d.hosted_network);
+    }
+
+    #[test]
+    fn parses_this_box_captured_profiles() {
+        let out = r"
+
+Profiles on interface Wi-Fi:
+
+Group policy profiles (read only)
+---------------------------------
+<None>
+
+User profiles
+-------------
+All User Profile     : BELL409
+All User Profile     : BunkeR_net
+All User Profile     : Mesh
+";
+        let v = parse_profiles(out);
+        let names: Vec<&str> = v.iter().map(|p| p.name.as_str()).collect();
+        assert_eq!(names, vec!["BELL409", "BunkeR_net", "Mesh"]);
+        assert_eq!(v[0].interface.as_deref(), Some("Wi-Fi"));
+    }
+
+    #[test]
+    fn current_profile_is_read_from_interfaces() {
+        let out = "    Profile                : BELL409\n    State                  : connected\n";
+        assert_eq!(
+            current_profile_from_interfaces(out).as_deref(),
+            Some("BELL409")
+        );
+        assert_eq!(current_profile_from_interfaces(""), None);
+    }
+
+    #[test]
+    fn release_plan_is_dry_run_and_explicit() {
+        let plan = adoreble_core::plan_release(Some("GSV-Peers"), "BELL409");
+        assert_eq!(plan.from.as_deref(), Some("GSV-Peers"));
+        assert_eq!(plan.to, "BELL409");
+        assert_eq!(plan.commands.len(), 1);
+        assert_eq!(plan.commands[0][0], "netsh");
+        assert!(plan.commands[0].iter().any(|a| a == "name=BELL409"));
     }
 
     #[test]

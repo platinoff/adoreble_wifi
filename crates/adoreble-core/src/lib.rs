@@ -11,6 +11,7 @@ use serde::{Deserialize, Serialize};
 
 /// Which radio state the adapter should be in.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "kebab-case")]
 pub enum WifiMode {
     /// Client to a known SSID (default; e.g. current `BELL409`).
     #[default]
@@ -80,6 +81,13 @@ pub struct Settings {
     pub auto_release_unreachable_ms: u64,
     /// Staging marker: true between `/api/settings/stage` and `/api/settings/apply`.
     pub staged: bool,
+    /// GSV hub health-probe candidates, tried in order.
+    #[serde(default = "default_candidates")]
+    pub gsv_hub_candidates: Vec<String>,
+}
+
+fn default_candidates() -> Vec<String> {
+    default_hub_candidates()
 }
 
 impl Default for Settings {
@@ -98,6 +106,7 @@ impl Default for Settings {
             auto_start: true,
             auto_release_unreachable_ms: 120_000,
             staged: false,
+            gsv_hub_candidates: default_hub_candidates(),
         }
     }
 }
@@ -115,6 +124,78 @@ impl Settings {
 /// Redact a potential secret for log output.
 pub fn redact_str(_value: &str) -> &'static str {
     "<redacted>"
+}
+
+/// One GSV-hub probe outcome (read-only HTTP GET of `/api/health`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HubProbeResult {
+    pub url: String,
+    pub ok: bool,
+    /// Round-trip milliseconds (0 when the probe failed before any response).
+    pub latency_ms: u64,
+    /// HTTP status as string, or the transport error message.
+    pub detail: String,
+}
+
+/// Decision returned by the fail-open policy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ReleaseAction {
+    /// Keep current mode.
+    Stay,
+    /// SLA broken: revert to the last-known-good profile (`LanClient`).
+    Release,
+}
+
+/// Fail-open policy: release only after **both** a sustained outage window
+/// and repeated probe failures. Pure function — never performs I/O.
+///
+/// `consecutive_failures`: probes in a row that failed.
+/// `unreachable_ms`: how long the hub has been continuously unreachable.
+/// `threshold_ms`: configured `auto_release_unreachable_ms`.
+pub fn evaluate_release(
+    consecutive_failures: u32,
+    unreachable_ms: u64,
+    threshold_ms: u64,
+) -> ReleaseAction {
+    const MIN_FAILURES: u32 = 3;
+    if consecutive_failures >= MIN_FAILURES && unreachable_ms >= threshold_ms {
+        ReleaseAction::Release
+    } else {
+        ReleaseAction::Stay
+    }
+}
+
+/// What fail-open `release` would do, without doing it. Pure; the caller
+/// decides whether to execute (owner-gated in ADO-3+).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReleasePlan {
+    pub from: Option<String>,
+    pub to: String,
+    /// The exact command vectors that would run, in order.
+    pub commands: Vec<Vec<String>>,
+}
+
+/// Build (but never run) the fail-open release plan.
+pub fn plan_release(from: Option<&str>, to: &str) -> ReleasePlan {
+    ReleasePlan {
+        from: from.map(str::to_string),
+        to: to.to_string(),
+        commands: vec![vec![
+            "netsh".to_string(),
+            "wlan".to_string(),
+            "connect".to_string(),
+            format!("name={to}"),
+        ]],
+    }
+}
+
+/// Default probe candidates (LAN-first per GSV band 233; loopback last).
+/// Overridable via `Settings::gsv_hub_candidates`.
+pub fn default_hub_candidates() -> Vec<String> {
+    vec![
+        "http://192.168.2.238:9999/api/health".to_string(),
+        "http://127.0.0.1:9999/api/health".to_string(),
+    ]
 }
 
 #[cfg(test)]
@@ -144,5 +225,47 @@ mod tests {
         assert_eq!(WifiMode::Hotspot.as_str(), "hotspot");
         assert_eq!(WifiMode::Bridge.as_str(), "bridge");
         assert_eq!(WifiMode::ReleaseFallback.as_str(), "release-fallback");
+    }
+
+    #[test]
+    fn release_policy_needs_both_signals() {
+        // Sustained outage + repeated failures => release.
+        assert_eq!(
+            evaluate_release(3, 120_000, 120_000),
+            ReleaseAction::Release
+        );
+        assert_eq!(evaluate_release(10, 60_000, 120_000), ReleaseAction::Stay);
+        assert_eq!(evaluate_release(2, 200_000, 120_000), ReleaseAction::Stay);
+        assert_eq!(evaluate_release(0, 0, 120_000), ReleaseAction::Stay);
+    }
+
+    #[test]
+    fn default_candidates_are_lan_first() {
+        let c = default_hub_candidates();
+        assert!(c.len() >= 2);
+        assert!(c[0].contains("192.168."), "LAN candidate must come first");
+        assert!(c.iter().all(|u| u.ends_with("/api/health")));
+    }
+
+    #[test]
+    fn settings_deserialize_without_candidates_field() {
+        // Backward compat with ADO-0's data/adoreble.json (no gsv_hub_candidates).
+        let legacy = r#"{
+            "enabled": false,
+            "preferred_mode": "lan-client",
+            "hotspot": {
+                "ssid": "GSV-Peers",
+                "password": "",
+                "security": "wpa2-aes",
+                "band": "2.4ghz",
+                "channel": null,
+                "max_clients": 8
+            },
+            "auto_start": true,
+            "auto_release_unreachable_ms": 120000,
+            "staged": false
+        }"#;
+        let s: Settings = serde_json::from_str(legacy).expect("legacy settings must load");
+        assert_eq!(s.gsv_hub_candidates, default_hub_candidates());
     }
 }
