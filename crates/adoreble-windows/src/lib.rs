@@ -193,6 +193,369 @@ pub fn current_profile_from_interfaces(output: &str) -> Option<String> {
         .map(|(_, v)| v)
 }
 
+/// Live Mobile Hotspot status snapshot (redacted — no passphrase).
+#[derive(Debug, Clone, Serialize)]
+pub struct HotspotStatus {
+    /// `on | off | in-transition | unknown`
+    pub operational_state: String,
+    /// TetheringCapability debug repr for the shared internet profile.
+    pub capability: Option<String>,
+    pub ssid: Option<String>,
+    pub band: Option<String>,
+    pub authentication: Option<String>,
+    pub max_clients: Option<u32>,
+    pub client_count: Option<u32>,
+    /// Which internet connection profile is shared (e.g. `BELL409`).
+    pub shared_profile: Option<String>,
+    /// AP gateway address peers receive (Windows ICS default 192.168.137.1).
+    pub gateway_ip: Option<String>,
+}
+
+/// Pick the profile that carries internet (prefer `InternetAccess`, else first).
+#[cfg(windows)]
+fn pick_internet_profile() -> Result<windows::Networking::Connectivity::ConnectionProfile, String> {
+    use windows::Networking::Connectivity::{NetworkConnectivityLevel, NetworkInformation};
+    let profiles = NetworkInformation::GetConnectionProfiles()
+        .map_err(|e| format!("GetConnectionProfiles: {e}"))?;
+    let size = profiles.Size().map_err(|e| format!("profiles size: {e}"))?;
+    let mut chosen = None;
+    for i in 0..size {
+        if let Ok(p) = profiles.GetAt(i) {
+            let level = p
+                .GetNetworkConnectivityLevel()
+                .unwrap_or(NetworkConnectivityLevel::None);
+            if level == NetworkConnectivityLevel::InternetAccess {
+                return Ok(p);
+            }
+            if chosen.is_none() {
+                chosen = Some(p);
+            }
+        }
+    }
+    chosen.ok_or_else(|| "no connection profiles found".to_string())
+}
+
+#[cfg(windows)]
+fn op_state_str(
+    s: windows::Networking::NetworkOperators::TetheringOperationalState,
+) -> &'static str {
+    use windows::Networking::NetworkOperators::TetheringOperationalState;
+    if s == TetheringOperationalState::On {
+        "on"
+    } else if s == TetheringOperationalState::Off {
+        "off"
+    } else if s == TetheringOperationalState::InTransition {
+        "in-transition"
+    } else {
+        "unknown"
+    }
+}
+
+#[cfg(windows)]
+fn collect_status(
+    mgr: &windows::Networking::NetworkOperators::NetworkOperatorTetheringManager,
+    profile_name: Option<String>,
+    capability: Option<String>,
+    gateway_ip: Option<String>,
+) -> HotspotStatus {
+    use windows::Networking::NetworkOperators::{
+        TetheringWiFiAuthenticationKind, TetheringWiFiBand,
+    };
+    let cfg = mgr.GetCurrentAccessPointConfiguration().ok();
+    let (ssid, band, auth) = match &cfg {
+        Some(c) => {
+            let ssid = c.Ssid().map(|h| h.to_string_lossy()).ok();
+            let band = match c.Band() {
+                Ok(b) if b == TetheringWiFiBand::TwoPointFourGigahertz => {
+                    Some("2.4ghz".to_string())
+                }
+                Ok(b) if b == TetheringWiFiBand::FiveGigahertz => Some("5ghz".to_string()),
+                Ok(b) if b == TetheringWiFiBand::Auto => Some("auto".to_string()),
+                Ok(_) => Some("other".to_string()),
+                Err(_) => None,
+            };
+            let auth = match c.AuthenticationKind() {
+                Ok(a) if a == TetheringWiFiAuthenticationKind::Wpa2 => Some("wpa2".to_string()),
+                Ok(a) if a == TetheringWiFiAuthenticationKind::Wpa3 => Some("wpa3".to_string()),
+                Ok(a) if a == TetheringWiFiAuthenticationKind::Wpa3TransitionMode => {
+                    Some("wpa3-transition".to_string())
+                }
+                Ok(_) => Some("other".to_string()),
+                Err(_) => None,
+            };
+            (ssid, band, auth)
+        }
+        None => (None, None, None),
+    };
+    HotspotStatus {
+        operational_state: op_state_str(mgr.TetheringOperationalState().unwrap_or_default())
+            .to_string(),
+        capability,
+        ssid,
+        band,
+        authentication: auth,
+        max_clients: mgr.MaxClientCount().ok(),
+        client_count: mgr.ClientCount().ok(),
+        shared_profile: profile_name,
+        gateway_ip,
+    }
+}
+
+/// Detect the ICS gateway address the AP hands to peers (192.168.137.x).
+#[cfg(windows)]
+pub fn detect_gateway_ip() -> Option<String> {
+    let out = std::process::Command::new("ipconfig").output().ok()?;
+    let text = String::from_utf8_lossy(&out.stdout);
+    for line in text.lines() {
+        for token in line.split_whitespace() {
+            let ip = token.trim_end_matches('.').trim();
+            if ip.starts_with("192.168.137.") && ip.chars().all(|c| c.is_ascii_digit() || c == '.')
+            {
+                return Some(ip.to_string());
+            }
+        }
+    }
+    Some("192.168.137.1".to_string())
+}
+
+/// Inner status collector (returns `Err(msg)` on any probe failure).
+#[cfg(windows)]
+fn hotspot_status_inner() -> Result<HotspotStatus, String> {
+    use windows::Networking::NetworkOperators::*;
+    let profile = pick_internet_profile()?;
+    let profile_name = profile.ProfileName().map(|s| s.to_string_lossy()).ok();
+    let capability =
+        NetworkOperatorTetheringManager::GetTetheringCapabilityFromConnectionProfile(&profile)
+            .map(|c| format!("{c:?}"))
+            .ok();
+    let mgr = NetworkOperatorTetheringManager::CreateFromConnectionProfile(&profile)
+        .map_err(|e| format!("CreateFromConnectionProfile: {e}"))?;
+    Ok(collect_status(
+        &mgr,
+        profile_name,
+        capability,
+        detect_gateway_ip(),
+    ))
+}
+
+/// Read-only live hotspot snapshot.
+#[cfg(windows)]
+pub fn hotspot_status() -> HotspotStatus {
+    use windows::Win32::System::WinRT::{RO_INIT_MULTITHREADED, RoInitialize, RoUninitialize};
+
+    unsafe {
+        let _ = RoInitialize(RO_INIT_MULTITHREADED);
+    }
+
+    let result = hotspot_status_inner();
+
+    unsafe { RoUninitialize() };
+    match result {
+        Ok(s) => s,
+        Err(e) => HotspotStatus {
+            operational_state: "unknown".to_string(),
+            capability: None,
+            ssid: None,
+            band: None,
+            authentication: None,
+            max_clients: None,
+            client_count: None,
+            shared_profile: None,
+            gateway_ip: detect_gateway_ip(),
+        }
+        .with_error(&e),
+    }
+}
+
+impl HotspotStatus {
+    #[cfg_attr(not(windows), allow(dead_code))]
+    fn with_error(mut self, msg: &str) -> Self {
+        self.operational_state = format!("error: {msg}");
+        self
+    }
+}
+
+/// Configure + start Mobile Hotspot (owner-gated operation).
+/// Synchronous: drives the WinRT async operations with a local executor —
+/// WinRT handles are `!Send`, so no state is held across executor awaits.
+#[cfg(windows)]
+pub fn hotspot_start(ssid: &str, passphrase: &str) -> Result<HotspotStatus, String> {
+    use futures::executor::block_on;
+    use windows::Networking::NetworkOperators::*;
+    use windows::Win32::System::WinRT::{RO_INIT_MULTITHREADED, RoInitialize, RoUninitialize};
+    use windows::core::HSTRING;
+
+    unsafe {
+        let _ = RoInitialize(RO_INIT_MULTITHREADED);
+    }
+
+    let result = (|| {
+        let profile = pick_internet_profile()?;
+        let profile_name = profile.ProfileName().map(|s| s.to_string_lossy()).ok();
+        let capability =
+            NetworkOperatorTetheringManager::GetTetheringCapabilityFromConnectionProfile(&profile)
+                .map(|c| format!("{c:?}"))
+                .ok();
+
+        let mgr = NetworkOperatorTetheringManager::CreateFromConnectionProfile(&profile)
+            .map_err(|e| format!("CreateFromConnectionProfile: {e}"))?;
+
+        // 1) Configure access point (SSID/passphrase/band/auth).
+        let cfg = NetworkOperatorTetheringAccessPointConfiguration::new()
+            .map_err(|e| format!("AccessPointConfiguration::new: {e}"))?;
+        cfg.SetSsid(&HSTRING::from(ssid))
+            .map_err(|e| format!("SetSsid: {e}"))?;
+        cfg.SetPassphrase(&HSTRING::from(passphrase))
+            .map_err(|e| format!("SetPassphrase: {e}"))?;
+        if cfg
+            .IsBandSupported(TetheringWiFiBand::TwoPointFourGigahertz)
+            .unwrap_or(false)
+        {
+            let _ = cfg.SetBand(TetheringWiFiBand::TwoPointFourGigahertz);
+        }
+        if cfg
+            .IsAuthenticationKindSupported(TetheringWiFiAuthenticationKind::Wpa2)
+            .unwrap_or(true)
+        {
+            let _ = cfg.SetAuthenticationKind(TetheringWiFiAuthenticationKind::Wpa2);
+        }
+        block_on(async {
+            mgr.ConfigureAccessPointAsync(&cfg)
+                .map_err(|e| format!("ConfigureAccessPointAsync: {e}"))?
+                .await
+                .map_err(|e| format!("ConfigureAccessPointAsync await: {e}"))
+        })?;
+
+        // 2) Start tethering + verify.
+        let res = block_on(async {
+            mgr.StartTetheringAsync()
+                .map_err(|e| format!("StartTetheringAsync: {e}"))?
+                .await
+                .map_err(|e| format!("StartTetheringAsync await: {e}"))
+        })?;
+        let status = res.Status().map_err(|e| format!("Status: {e}"))?;
+        if status != TetheringOperationStatus::Success
+            && status != TetheringOperationStatus::AlreadyOn
+        {
+            let msg = res
+                .AdditionalErrorMessage()
+                .map(|h| h.to_string_lossy())
+                .unwrap_or_default();
+            return Err(format!(
+                "hotspot start failed: status={} msg={}",
+                status.0, msg
+            ));
+        }
+
+        // 3) Poll operational state until On (max ~20s).
+        for _ in 0..40 {
+            if let Ok(s) = mgr.TetheringOperationalState()
+                && s == TetheringOperationalState::On
+            {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(500));
+        }
+
+        Ok(collect_status(
+            &mgr,
+            profile_name,
+            capability,
+            detect_gateway_ip(),
+        ))
+    })();
+
+    unsafe { RoUninitialize() };
+    result
+}
+
+/// Stop Mobile Hotspot (fail-open path leaves the STA profile untouched).
+/// Synchronous — see `hotspot_start` for the !Send rationale.
+#[cfg(windows)]
+pub fn hotspot_stop() -> Result<HotspotStatus, String> {
+    use futures::executor::block_on;
+    use windows::Networking::NetworkOperators::*;
+    use windows::Win32::System::WinRT::{RO_INIT_MULTITHREADED, RoInitialize, RoUninitialize};
+
+    unsafe {
+        let _ = RoInitialize(RO_INIT_MULTITHREADED);
+    }
+
+    let result = (|| {
+        let profile = pick_internet_profile()?;
+        let profile_name = profile.ProfileName().map(|s| s.to_string_lossy()).ok();
+        let capability =
+            NetworkOperatorTetheringManager::GetTetheringCapabilityFromConnectionProfile(&profile)
+                .map(|c| format!("{c:?}"))
+                .ok();
+
+        let mgr = NetworkOperatorTetheringManager::CreateFromConnectionProfile(&profile)
+            .map_err(|e| format!("CreateFromConnectionProfile: {e}"))?;
+
+        let res = block_on(async {
+            mgr.StopTetheringAsync()
+                .map_err(|e| format!("StopTetheringAsync: {e}"))?
+                .await
+                .map_err(|e| format!("StopTetheringAsync await: {e}"))
+        })?;
+        let status = res.Status().map_err(|e| format!("Status: {e}"))?;
+        if status != TetheringOperationStatus::Success {
+            let msg = res
+                .AdditionalErrorMessage()
+                .map(|h| h.to_string_lossy())
+                .unwrap_or_default();
+            return Err(format!(
+                "hotspot stop failed: status={} msg={}",
+                status.0, msg
+            ));
+        }
+
+        for _ in 0..40 {
+            if let Ok(s) = mgr.TetheringOperationalState()
+                && s == TetheringOperationalState::Off
+            {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(500));
+        }
+
+        Ok(collect_status(
+            &mgr,
+            profile_name,
+            capability,
+            detect_gateway_ip(),
+        ))
+    })();
+
+    unsafe { RoUninitialize() };
+    result
+}
+
+#[cfg(not(windows))]
+pub fn hotspot_status() -> HotspotStatus {
+    HotspotStatus {
+        operational_state: "unsupported".to_string(),
+        capability: None,
+        ssid: None,
+        band: None,
+        authentication: None,
+        max_clients: None,
+        client_count: None,
+        shared_profile: None,
+        gateway_ip: None,
+    }
+}
+
+#[cfg(not(windows))]
+pub fn hotspot_start(_ssid: &str, _passphrase: &str) -> Result<HotspotStatus, String> {
+    Err("hotspot is Windows-only".to_string())
+}
+
+#[cfg(not(windows))]
+pub fn hotspot_stop() -> Result<HotspotStatus, String> {
+    Err("hotspot is Windows-only".to_string())
+}
+
 /// Static placeholder capabilities for this dev box (ADO-0).
 /// ADO-1 replaces this with a real probe (tethering state, bands, WPA3).
 #[cfg(windows)]

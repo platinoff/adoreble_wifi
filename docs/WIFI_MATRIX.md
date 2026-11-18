@@ -18,12 +18,22 @@ eagerly enabled.** ADO-3 (Hotspot) is viable on this host without new hardware.
 **Profiles currently visible to the host:** `BELL409` (current), `Bluetooth Network Connection`,
 `BunkeR_net`, `Mesh`, `MeshAlt`, `Annear` (+ others) — tethering capability enabled on all.
 
+## ADO-3 (2026-11-18, live — owner go)
+
+- **Hotspot LIVE**: SSID `GSV-Peers-6442` (auto-generated), band **2.4 GHz**, auth **WPA2-PSK**, shared profile **BELL409**, gateway **192.168.137.1**, `client_count=0` (waiting for phone onboarding).
+- Hub досяжний з AP-підмережі: `http://192.168.137.1:9999/api/health` → **200** (`/api/wgpu/mesh` → 200 з даними про піри).
+- SSID/пароль згенеровано й застосовано через plugin (staged→persisted у `data/adoreble.json` — **gitignored**, пароль ніде не логувався). SSID згенеровано як було заплановано (`GSV-Peers-xxxx`).
+- **Онбординг пірів**: `data/peer-join.html` (SVG QR: Wi-Fi join + mesh page `http://192.168.137.1:9999/wgpu`) — один раз відсканувати кожним телефоном; далі Android сам перепідключається.
+- **ADB zero-touch**: недоступний — `adb devices` порожній (потрібне увімкнене Wireless debugging на телефонах + повторний pairing).
+- Відкат: `adoreble-wifi hotspot stop` (STA-профіль BELL409 не чіпається).
+- Pi 4 — не чіпали (рішення owner: канал C).
+
 ## ADO-2 (2026-11-18, пізно)
 
-- `adoreble-wifi probe-hub` → read-only HTTP GET `/api/health` для кандидатів (LAN-first). На момент перевірки **hub не відповідає** (timeout ×2: `192.168.2.238` і `127.0.0.1`) — хаб падає від RAM; P0 власника.
-- `POST /api/probe-hub` (token-gated) на loopback API — те саме для UI/автоматизації.
+- `adoreble-wifi probe-hub` / `POST /api/probe-hub` — read-only HTTP GET `/api/health` для кандидатів (LAN-first). На момент ADO-2 хаб не відповідав (timeout); на момент ADO-3 хаб живий (200 на `:9999` і на `192.168.137.1:9999`).
 - Saved profiles знайдено через `netsh wlan show profiles` (parser у плагіні).
-- **Live-перемикання (`netsh wlan connect`) НЕ виконується** — тільки сухий план (`adoreble-wifi release`).ADO-3 потребує owner-gate.
+- Live LAN-перемикання досі НЕ виконується (`netsh wlan connect` тільки в dry-run); ADO-3 свідомо обмежений хотспотом.
+
 
 ## Rules
 

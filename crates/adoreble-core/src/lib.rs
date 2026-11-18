@@ -189,6 +189,92 @@ pub fn plan_release(from: Option<&str>, to: &str) -> ReleasePlan {
     }
 }
 
+/// Generate a WPA2-compatible passphrase (letters+digits, unambiguous).
+/// Pure; never logged — callers persist it to `data/adoreble.json` only.
+pub fn generate_wpa2_passphrase(len: usize) -> String {
+    use rand::Rng;
+    // Avoid ambiguous glyphs (l/1/I, O/0) for phone-side typing.
+    const ALPHABET: &[u8] = b"ABCDEFGHJKMNPQRSTUVWXYZabcdefghjkmnpqrstuvwxyz23456789";
+    let mut rng = rand::thread_rng();
+    (0..len.max(12))
+        .map(|_| ALPHABET[rng.gen_range(0..ALPHABET.len())] as char)
+        .collect()
+}
+
+/// Deterministic-ish SSID suffix from RNG (e.g. `GSV-Peers-4821`).
+pub fn generate_ssid(prefix: &str) -> String {
+    use rand::Rng;
+    let n: u32 = rand::thread_rng().gen_range(1000..10000);
+    format!("{prefix}-{n}")
+}
+
+/// Wi-Fi QR payload (`WIFI:T:WPA;S:<ssid>;P:<pass>;;`).
+/// Escapes `\ ; , : "` in ssid/pass per ZXing spec.
+pub fn wpa_qr_payload(ssid: &str, passphrase: &str) -> String {
+    fn esc(s: &str) -> String {
+        let mut out = String::with_capacity(s.len() + 4);
+        for c in s.chars() {
+            if matches!(c, '\\' | ';' | ',' | ':' | '"') {
+                out.push('\\');
+            }
+            out.push(c);
+        }
+        out
+    }
+    format!("WIFI:T:WPA;S:{};P:{};;", esc(ssid), esc(passphrase))
+}
+
+/// GSV hub mesh page URL for a given gateway/AP host.
+pub fn mesh_url(gateway: &str) -> String {
+    format!("http://{gateway}:9999/wgpu")
+}
+
+/// Load settings from `path`; missing file ⇒ `Settings::default()`.
+pub fn load_settings(path: &std::path::Path) -> Result<Settings, String> {
+    if !path.exists() {
+        return Ok(Settings::default());
+    }
+    let raw = std::fs::read_to_string(path).map_err(|e| format!("read {}: {e}", path.display()))?;
+    serde_json::from_str(&raw).map_err(|e| format!("parse {}: {e}", path.display()))
+}
+
+/// Persist settings atomically (tmp file + rename). Unix: 0600 perms.
+pub fn persist_settings(path: &std::path::Path, settings: &Settings) -> Result<(), String> {
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir).map_err(|e| format!("create {}: {e}", dir.display()))?;
+    }
+    let tmp = path.with_extension("json.tmp");
+    let body =
+        serde_json::to_vec_pretty(settings).map_err(|e| format!("serialize settings: {e}"))?;
+    std::fs::write(&tmp, &body).map_err(|e| format!("write {}: {e}", tmp.display()))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600));
+    }
+    std::fs::rename(&tmp, path).map_err(|e| format!("rename {}: {e}", path.display()))
+}
+
+/// Fill missing hotspot secrets in-place (SSID suffix + WPA2 passphrase).
+/// Returns `(ssid, passphrase)` — passphrase must never be logged.
+pub fn ensure_hotspot_secrets(settings: &mut Settings) -> (String, String) {
+    let ssid = if settings.hotspot.ssid.trim().is_empty() || settings.hotspot.ssid == "GSV-Peers" {
+        generate_ssid("GSV-Peers")
+    } else {
+        settings.hotspot.ssid.clone()
+    };
+    let passphrase = if settings.hotspot.password.is_empty() {
+        generate_wpa2_passphrase(12)
+    } else {
+        settings.hotspot.password.clone()
+    };
+    settings.hotspot.ssid = ssid.clone();
+    settings.hotspot.password = passphrase.clone();
+    settings.enabled = true;
+    settings.preferred_mode = WifiMode::Hotspot;
+    (ssid, passphrase)
+}
+
 /// Default probe candidates (LAN-first per GSV band 233; loopback last).
 /// Overridable via `Settings::gsv_hub_candidates`.
 pub fn default_hub_candidates() -> Vec<String> {
@@ -237,6 +323,68 @@ mod tests {
         assert_eq!(evaluate_release(10, 60_000, 120_000), ReleaseAction::Stay);
         assert_eq!(evaluate_release(2, 200_000, 120_000), ReleaseAction::Stay);
         assert_eq!(evaluate_release(0, 0, 120_000), ReleaseAction::Stay);
+    }
+
+    #[test]
+    fn wpa2_passphrase_is_typed_unambiguous_and_long_enough() {
+        let p = generate_wpa2_passphrase(16);
+        assert_eq!(p.len(), 16);
+        assert!(p.chars().all(|c| c.is_ascii_alphanumeric()));
+        assert!(!p.contains('l') && !p.contains('I') && !p.contains('O') && !p.contains('0'));
+        assert_ne!(generate_wpa2_passphrase(16), generate_wpa2_passphrase(16));
+    }
+
+    #[test]
+    fn ssid_suffix_stays_in_range() {
+        for _ in 0..50 {
+            let s = generate_ssid("GSV-Peers");
+            let n: u32 = s.strip_prefix("GSV-Peers-").unwrap().parse().unwrap();
+            assert!((1000..10000).contains(&n));
+        }
+    }
+
+    #[test]
+    fn qr_payload_escapes_specials() {
+        assert_eq!(
+            wpa_qr_payload("plain", "pass"),
+            "WIFI:T:WPA;S:plain;P:pass;;"
+        );
+        assert_eq!(wpa_qr_payload("a;b", "p:q"), "WIFI:T:WPA;S:a\\;b;P:p\\:q;;");
+    }
+
+    #[test]
+    fn mesh_url_targets_hub_port() {
+        assert_eq!(mesh_url("192.168.137.1"), "http://192.168.137.1:9999/wgpu");
+    }
+
+    #[test]
+    fn ensure_hotspot_secrets_fills_and_is_idempotent() {
+        let mut s = Settings::default();
+        let (ssid, pass) = ensure_hotspot_secrets(&mut s);
+        assert!(ssid.starts_with("GSV-Peers-"));
+        assert_eq!(pass.len(), 12);
+        assert!(s.enabled);
+        assert_eq!(s.preferred_mode, WifiMode::Hotspot);
+        let pass2 = s.hotspot.password.clone();
+        let (_, pass_again) = ensure_hotspot_secrets(&mut s);
+        assert_eq!(
+            pass_again, pass2,
+            "passphrase must not be regenerated once set"
+        );
+    }
+
+    #[test]
+    fn settings_roundtrip_via_persist() {
+        let dir = std::env::temp_dir().join(format!("adoreble-test-{}", std::process::id()));
+        let path = dir.join("adoreble.json");
+        let mut s = Settings::default();
+        s.hotspot.password = "roundtrip-secret".to_string();
+        persist_settings(&path, &s).unwrap();
+        let loaded = load_settings(&path).unwrap();
+        assert_eq!(loaded.hotspot.password, "roundtrip-secret");
+        let missing = load_settings(&dir.join("nope.json")).unwrap();
+        assert!(!missing.enabled);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

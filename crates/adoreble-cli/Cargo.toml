@@ -16,6 +16,7 @@ serde_json.workspace = true
 serde.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
 reqwest = { version = "0.13", default-features = false, features = ["json", "http2", "native-tls"] }
+qrcode = "0.14"
 adoreble-core = { path = "../adoreble-core" }
 
 [target.'cfg(windows)'.dependencies]

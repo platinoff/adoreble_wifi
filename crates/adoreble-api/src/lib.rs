@@ -68,6 +68,9 @@ pub fn router(state: AppState) -> Router {
         .route("/api/settings/stage", post(stage_settings))
         .route("/api/settings/apply", post(apply_settings))
         .route("/api/probe-hub", post(probe_hub))
+        .route("/api/hotspot/status", get(hotspot_status))
+        .route("/api/hotspot/start", post(hotspot_start))
+        .route("/api/hotspot/stop", post(hotspot_stop))
         .layer(middleware::from_fn_with_state(state.clone(), token_gate))
         .with_state(state)
 }
@@ -267,6 +270,107 @@ async fn probe_hub(
             .collect(),
     };
     Json(json!({"ok": true, "results": results}))
+}
+
+/// Optional body for `/api/hotspot/start`.
+#[derive(serde::Deserialize)]
+pub struct HotspotStartBody {
+    /// Override SSID (default: settings or generated).
+    #[serde(default)]
+    pub ssid: Option<String>,
+    /// Override WPA2 passphrase (never echoed back).
+    #[serde(default)]
+    pub passphrase: Option<String>,
+}
+
+/// Live hotspot snapshot (redacted — no passphrase).
+async fn hotspot_status() -> Json<serde_json::Value> {
+    #[cfg(windows)]
+    {
+        Json(json!({"ok": true, "status": adoreble_windows::hotspot_status()}))
+    }
+    #[cfg(not(windows))]
+    {
+        Json(json!({"ok": false, "error": "hotspot is Windows-only"}))
+    }
+}
+
+/// Configure + start Mobile Hotspot (owner-gated; token-required POST).
+/// Secrets are persisted to `data/adoreble.json`, never returned or logged.
+async fn hotspot_start(
+    State(state): State<AppState>,
+    body: Option<axum::Json<HotspotStartBody>>,
+) -> Response {
+    let path = state.data_dir.join("adoreble.json");
+    let mut settings = match adoreble_core::load_settings(&path) {
+        Ok(s) => s,
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"ok": false, "error": e})),
+            )
+                .into_response();
+        }
+    };
+    if let Some(axum::Json(b)) = body {
+        if let Some(s) = b.ssid {
+            settings.hotspot.ssid = s;
+        }
+        if let Some(p) = b.passphrase {
+            settings.hotspot.password = p;
+        }
+    }
+    let (ssid, passphrase) = adoreble_core::ensure_hotspot_secrets(&mut settings);
+    if adoreble_core::persist_settings(&path, &settings).is_err() {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"ok": false, "error": "failed to persist settings"})),
+        )
+            .into_response();
+    }
+    #[cfg(windows)]
+    {
+        match adoreble_windows::hotspot_start(&ssid, &passphrase) {
+            Ok(status) => Json(json!({"ok": true, "status": status})).into_response(),
+            Err(e) => (
+                StatusCode::BAD_GATEWAY,
+                Json(json!({"ok": false, "error": e})),
+            )
+                .into_response(),
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = (ssid, passphrase);
+        (
+            StatusCode::NOT_IMPLEMENTED,
+            Json(json!({"ok": false, "error": "hotspot is Windows-only"})),
+        )
+            .into_response()
+    }
+}
+
+/// Stop Mobile Hotspot (token-required POST). STA profile untouched.
+async fn hotspot_stop() -> Response {
+    #[cfg(windows)]
+    {
+        match adoreble_windows::hotspot_stop() {
+            Ok(status) => Json(json!({"ok": true, "status": status})).into_response(),
+            Err(e) => (
+                StatusCode::BAD_GATEWAY,
+                Json(json!({"ok": false, "error": e})),
+            )
+                .into_response(),
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        (
+            StatusCode::NOT_IMPLEMENTED,
+            Json(json!({"ok": false, "error": "hotspot is Windows-only"})),
+        )
+            .into_response()
+    }
 }
 
 /// Default data directory: `data/` under CWD (gitignored in this repo).
