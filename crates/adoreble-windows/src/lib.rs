@@ -301,10 +301,20 @@ fn collect_status(
     }
 }
 
+/// Spawn a Windows console tool without flashing a console window.
+#[cfg(windows)]
+fn hidden_command(program: &str) -> std::process::Command {
+    use std::os::windows::process::CommandExt;
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    let mut cmd = std::process::Command::new(program);
+    cmd.creation_flags(CREATE_NO_WINDOW);
+    cmd
+}
+
 /// Detect the ICS gateway address the AP hands to peers (192.168.137.x).
 #[cfg(windows)]
 pub fn detect_gateway_ip() -> Option<String> {
-    let out = std::process::Command::new("ipconfig").output().ok()?;
+    let out = hidden_command("ipconfig").output().ok()?;
     let text = String::from_utf8_lossy(&out.stdout);
     for line in text.lines() {
         for token in line.split_whitespace() {

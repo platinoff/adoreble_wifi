@@ -211,7 +211,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 #[cfg(windows)]
 fn capture_netsh(args: &[&str]) -> Result<String, Box<dyn std::error::Error>> {
+    use std::os::windows::process::CommandExt;
+    // CREATE_NO_WINDOW — netsh must not flash a console window.
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
     let out = std::process::Command::new("netsh")
+        .creation_flags(CREATE_NO_WINDOW)
         .args(args)
         .stdout(std::process::Stdio::piped())
         .output()?;
