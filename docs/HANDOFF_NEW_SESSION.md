@@ -10,6 +10,7 @@
 | API | **loopback `127.0.0.1:9770`** — `GET /health` · `GET /api/{status,adapters,settings,settings/stage,settings/apply}` · токен POSTs (`x-adoreble-token`; файл `data/adoreble.token`, 0600 unix) |
 | Безпека | loopback-only; settings **staged-in-memory → apply** (POST `/api/settings/apply`); паролі тільки в `data/adoreble.json` (gitignored, user-only); redact у всьому виводі |
 | Статус | **ADO-3 Hotspot LIVE** — SSID `GSV-Peers-6442` · 2.4 GHz · WPA2 · шлюз `192.168.137.1` · хаб `:9999` reachable з AP-підмережі · CLI `hotspot {start,stop,status,qr}` + API `/api/hotspot/*` · пірів очікуємо (QR-онбординг) |
+| **ADO-6 Auto-start DONE 2026-11-19** | Бут API підіймає хотспот (`auto_start` + enabled + mode=hotspot) · SLA watchdog (30с probe → auto-release на STA при 3× fail × threshold) · **autostart task**: `cargo run --bin xtask autostart install|uninstall|status` (HKCU Run або schtasks) · **25 тестів green** · встановлено на цьому боксі (HKCU Run AdorebleWiFi) |
 | Owner-рішення | канал **(C)** WinRT Tethering (не Pi 4); `auto_start=on` + **Save/Apply** замість live-мутації; **MIT**; ADO-3 go — хотспот + авто-підключення пірів |
 | ADO-2 | dry-run LAN-client scaffold — `probe-hub` / `POST /api/probe-hub`, `ReleasePlan`, `evaluate_release`; live `netsh wlan connect` не виконується |
 | План | [`GSV docs/superpowers/plans/2026-11-18-adoreble-wifi-plan.md`](../../GSV/docs/superpowers/plans/2026-11-18-adoreble-wifi-plan.md) |
