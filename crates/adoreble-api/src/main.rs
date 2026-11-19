@@ -18,11 +18,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let data_dir = std::env::var("ADOREBLE_DATA_DIR")
         .map(PathBuf::from)
         .unwrap_or_else(|_| PathBuf::from("data"));
+    let settings = adoreble_core::load_settings(&data_dir.join("adoreble.json"))
+        .unwrap_or_else(|e| {
+            tracing::warn!("adoreble.json load failed ({e}); starting with defaults");
+            Settings::default()
+        });
     let token = adoreble_api::load_or_create_token(&data_dir)?;
     let state = adoreble_api::AppState {
-        settings: Arc::new(Mutex::new(Settings::default())),
+        settings: Arc::new(Mutex::new(settings)),
         token: Arc::new(token),
         data_dir,
+        log_ring: Arc::new(Mutex::new(std::collections::VecDeque::new())),
+        log_seq: Arc::new(std::sync::atomic::AtomicU64::new(0)),
     };
     let addr = SocketAddr::from(([127, 0, 0, 1], 9770));
     let listener = tokio::net::TcpListener::bind(addr).await?;

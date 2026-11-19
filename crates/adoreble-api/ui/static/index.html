@@ -3,32 +3,334 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Adoreble Wi-Fi</title>
+<title>Adoreble Wi-Fi — control</title>
 <style>
   :root { color-scheme: dark; }
-  body { background: #050a14; color: #c4b5fd; font: 14px/1.5 system-ui, sans-serif; margin: 0; padding: 24px; }
-  h1 { font-size: 18px; letter-spacing: .04em; }
-  .badge { display: inline-block; padding: 2px 10px; border-radius: 999px; border: 1px solid #a78bfa; color: #a78bfa; font-size: 11px; }
-  pre { background: #0b1220; border: 1px solid #1e293b; border-radius: 8px; padding: 12px; overflow: auto; font-size: 12px; }
+  * { box-sizing: border-box; }
+  body { background:#050a14; color:#cdd6f4; font:13px/1.5 system-ui, sans-serif; margin:0; padding:0 0 40px; }
+  header { display:flex; align-items:center; gap:12px; padding:14px 18px; border-bottom:1px solid #1e2a44; background:#0b1220; position:sticky; top:0; z-index:10; flex-wrap:wrap; }
+  h1 { font-size:16px; letter-spacing:.05em; margin:0; color:#a78bfa; flex:1; }
+  .dot { width:10px; height:10px; border-radius:50%; background:#f87171; box-shadow:0 0 6px #f87171; }
+  .dot.on { background:#4ade80; box-shadow:0 0 6px #4ade80; }
+  .unlock { display:flex; gap:6px; align-items:center; }
+  input, select { background:#0b1220; color:#cdd6f4; border:1px solid #33415e; border-radius:8px; padding:6px 8px; font:inherit; }
+  input[type=checkbox] { width:18px; height:18px; accent-color:#a78bfa; }
+  button { background:#1b2538; color:#cdd6f4; border:1px solid #33415e; border-radius:8px; padding:8px 12px; font:inherit; cursor:pointer; }
+  button.primary { background:#6d5ae0; border-color:#6d5ae0; color:#fff; }
+  button.danger { background:#7f1d1d; border-color:#991b1b; }
+  button:hover { filter:brightness(1.15); }
+  button:disabled { opacity:.4; cursor:default; }
+  main { max-width:960px; margin:18px auto; padding:0 18px; }
+  nav { display:flex; gap:6px; margin:12px 0; flex-wrap:wrap; }
+  nav button { border-radius:999px; padding:6px 14px; font-size:12px; }
+  nav button.active { border-color:#a78bfa; color:#a78bfa; }
+  section { display:none; }
+  section.active { display:block; }
+  .grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(200px,1fr)); gap:10px; margin:12px 0; }
+  .card { background:#0b1220; border:1px solid #1e2a44; border-radius:12px; padding:12px 14px; }
+  .card h3 { font-size:11px; text-transform:uppercase; letter-spacing:.08em; color:#7f8ca3; margin:0 0 8px; }
+  .kv { display:flex; justify-content:space-between; padding:3px 0; border-bottom:1px dashed #141b31; font-size:12px; }
+  .kv:last-child { border-bottom:0; }
+  .k { color:#7f8ca3; }
+  .v { font-variant-numeric:tabular-nums; }
+  .pill { display:inline-block; padding:2px 10px; border-radius:999px; border:1px solid #33415e; font-size:10px; }
+  .pill.on { border-color:#4ade80; color:#86efac; }
+  .pill.off { border-color:#f87171; color:#fca5a5; }
+  .pill.warn { border-color:#fbbf24; color:#fcd34d; }
+  pre { background:#0b1220; border:1px solid #1e2a44; border-radius:10px; padding:10px; font-size:11px; max-height:260px; overflow:auto; }
+  table { width:100%; border-collapse:collapse; font-size:12px; }
+  th, td { text-align:left; padding:6px 8px; border-bottom:1px solid #141b31; }
+  th { color:#7f8ca3; font-size:10px; text-transform:uppercase; letter-spacing:.08em; }
+  form.grid2 { grid-template-columns:auto 1fr; gap:8px 12px; align-items:center; display:grid; max-width:480px; }
+  label.k2 { color:#7f8ca3; font-size:12px; }
+  .qr { display:flex; gap:16px; flex-wrap:wrap; align-items:flex-start; }
+  .qr figure { margin:0; text-align:center; background:#0b1220; border:1px solid #1e2a44; border-radius:12px; padding:10px; }
+  .qr figcaption { margin-top:6px; color:#a78bfa; font-size:11px; }
+  .lock-note { color:#fbbf24; font-size:11px; margin:8px 0; }
+  .ok-text { color:#86efac; }
+  .err-text { color:#fca5a5; }
+  #log { max-height:320px; overflow:auto; font-size:11px; font-family:ui-monospace,monospace; }
+  .log-line { padding:2px 0; border-bottom:1px solid #101528; }
+  .log-line .ts { color:#5b6b8f; margin-right:8px; }
+  .log-line.warn .msg { color:#fcd34d; }
+  .log-line.info .msg { color:#c4b5fd; }
 </style>
 </head>
 <body>
-<h1>Adoreble Wi-Fi <span class="badge">127.0.0.1:9770 · loopback</span></h1>
-<p>ADO-0 scaffold. <code>/health</code>, <code>/api/status</code>, <code>/api/settings[/stage|/apply]</code>.</p>
-<h2>Status</h2>
-<pre id="status">loading…</pre>
-<h2>Adapters</h2>
-<pre id="adapters">loading…</pre>
+<header>
+  <span class="dot" id="hubDot"></span>
+  <h1>Adoreble Wi-Fi <span style="font-size:10px;color:#5b6b8f">127.0.0.1:9770</span></h1>
+  <div class="unlock">
+    <input type="password" id="tokenInput" placeholder="token (once, stored locally)" aria-label="token">
+    <button id="tokenSave">Unlock</button>
+    <span id="lockState" class="pill off">locked</span>
+  </div>
+</header>
+<main>
+  <nav id="tabs">
+    <button data-tab="overview" class="active">Overview</button>
+    <button data-tab="adapters">Adapters</button>
+    <button data-tab="settings">Settings</button>
+    <button data-tab="qr">Join (QR)</button>
+    <button data-tab="logs">Logs</button>
+  </nav>
+
+  <section id="tab-overview" class="active">
+    <div class="grid">
+      <div class="card"><h3>Hotspot</h3>
+        <div class="kv"><span class="k">state</span><span class="v"><span class="pill" id="hsState">—</span></span></div>
+        <div class="kv"><span class="k">SSID</span><span class="v" id="hsSsid">—</span></div>
+        <div class="kv"><span class="k">band / auth</span><span class="v" id="hsBand">—</span></div>
+        <div class="kv"><span class="k">gateway</span><span class="v" id="hsGw">—</span></div>
+        <div class="kv"><span class="k">clients</span><span class="v" id="hsClients">—</span></div>
+        <div class="kv"><span class="k">shared profile</span><span class="v" id="hsShared">—</span></div>
+      </div>
+      <div class="card"><h3>Hub</h3>
+        <div class="kv"><span class="k">api health</span><span class="v" id="hubHealth">—</span></div>
+        <div class="kv"><span class="k">GSV mesh peers</span><span class="v" id="hubPeers">—</span></div>
+        <div class="kv"><span class="k">version</span><span class="v" id="hubVersion">—</span></div>
+        <div class="kv"><span class="k">enabled</span><span class="v" id="hubEnabled">—</span></div>
+      </div>
+      <div class="card"><h3>Actions</h3>
+        <div style="display:flex;gap:8px;flex-wrap:wrap">
+          <button id="btnStart" class="primary">Start hotspot</button>
+          <button id="btnStop" class="danger">Stop</button>
+          <button id="btnProbe">Probe GSV hub</button>
+        </div>
+        <pre id="actionOut">—</pre>
+      </div>
+    </div>
+  </section>
+
+  <section id="tab-adapters">
+    <h2 style="font-size:12px;letter-spacing:.08em;color:#7f8ca3;text-transform:uppercase">Adapters (from ADO-1 probe)</h2>
+    <div class="card"><table id="adaptersTable"><thead><tr><th>name</th><th>description</th><th>hosted</th><th>tethering</th><th>WPA3</th><th>bands</th></tr></thead><tbody></tbody></table></div>
+  </section>
+
+  <section id="tab-settings">
+    <h2 style="font-size:12px;letter-spacing:.08em;color:#7f8ca3;text-transform:uppercase">Staged → Apply (never live)</h2>
+    <form class="grid2" id="settingsForm">
+      <label class="k2" for="fEnabled">enabled</label><input type="checkbox" id="fEnabled">
+      <label class="k2" for="fMode">preferred mode</label>
+      <select id="fMode"><option value="lan-client">lan-client</option><option value="hotspot">hotspot</option><option value="bridge">bridge</option><option value="release-fallback">release-fallback</option></select>
+      <label class="k2" for="fAutoStart">auto_start</label><input type="checkbox" id="fAutoStart">
+      <label class="k2" for="fRelease">auto_release (ms)</label><input type="number" id="fRelease" min="0" step="1000">
+      <label class="k2" for="fSsid">SSID</label><input type="text" id="fSsid" maxlength="32">
+      <label class="k2" for="fPass">passphrase</label><input type="password" id="fPass" autocomplete="off" placeholder="(unchanged)">
+      <label class="k2" for="fBand">band</label><select id="fBand"><option value="2.4ghz">2.4 GHz</option><option value="5ghz">5 GHz</option></select>
+      <label class="k2" for="fChannel">channel</label><input type="number" id="fChannel" min="0" max="165" placeholder="auto">
+      <label class="k2" for="fMaxClients">max clients</label><input type="number" id="fMaxClients" min="1" max="64">
+      <div></div>
+      <div style="display:flex;gap:8px;align-items:center">
+        <button type="button" id="btnStage" class="primary">Stage</button>
+        <button type="button" id="btnApply">Apply (Save)</button>
+        <span id="stageState" class="pill off">not staged</span>
+      </div>
+    </form>
+    <pre id="settingsOut">loading…</pre>
+  </section>
+
+  <section id="tab-qr">
+    <h2 style="font-size:12px;letter-spacing:.08em;color:#7f8ca3;text-transform:uppercase">Scan to join</h2>
+    <p class="lock-note">QR encodes the Wi-Fi passphrase — visible only to whoever can see this screen. Token required.</p>
+    <div class="qr" id="qrBox"></div>
+    <pre id="qrOut">(unlock first)</pre>
+  </section>
+
+  <section id="tab-logs">
+    <h2 style="font-size:12px;letter-spacing:.08em;color:#7f8ca3;text-transform:uppercase">Live log (SSE /api/logs)</h2>
+    <div style="display:flex;gap:8px;margin:6px 0"><button id="btnClearLog">Clear</button><span id="logState" class="muted" style="color:#5b6b8f;font-size:11px;align-self:center">connecting…</span></div>
+    <div id="log"></div>
+  </section>
+</main>
 <script>
-const token = new URLSearchParams(location.search).get('token') || '';
-async function get(path) {
-  const r = await fetch(path);
-  return r.json();
+const $ = (s, r) => (r||document).querySelector(s);
+const $$ = (s, r) => Array.from((r||document).querySelectorAll(s));
+const TOKEN_KEY = 'adoreble.token';
+function token() { try { return localStorage.getItem(TOKEN_KEY) || ''; } catch { return ''; } }
+function setToken(t) { try { t ? localStorage.setItem(TOKEN_KEY, t) : localStorage.removeItem(TOKEN_KEY); } catch {}
+  renderLock(); }
+function renderLock() {
+  const has = !!token();
+  $('#lockState').textContent = has ? 'unlocked' : 'locked';
+  $('#lockState').className = 'pill ' + (has ? 'on' : 'off');
+  $('#tokenSave').textContent = has ? 'Lock' : 'Unlock';
 }
-(async () => {
-  document.getElementById('status').textContent = JSON.stringify(await get('/api/status'), null, 2);
-  document.getElementById('adapters').textContent = JSON.stringify(await get('/api/adapters'), null, 2);
-})();
+$('#tokenSave').addEventListener('click', () => {
+  if (token()) { setToken(''); return; }
+  const t = $('#tokenInput').value.trim();
+  if (t) setToken(t);
+});
+
+function esc(s) { return String(s ?? '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
+
+async function api(path, opts) {
+  opts = opts || {};
+  const headers = Object.assign({}, opts.headers || {});
+  const t = token();
+  if (t && (opts.auth ?? true)) headers['x-adoreble-token'] = t;
+  const r = await fetch(path, Object.assign({}, opts, { headers }));
+  let body = null;
+  try { body = await r.json(); } catch {}
+  return { ok: r.ok, status: r.status, body };
+}
+
+// ---------- tabs
+$('#tabs').addEventListener('click', (e) => {
+  const btn = e.target.closest('button[data-tab]'); if (!btn) return;
+  $$('#tabs button').forEach(b => b.classList.toggle('active', b === btn));
+  $$('main > section').forEach(s => s.classList.toggle('active', s.id === 'tab-' + btn.dataset.tab));
+});
+
+// ---------- Overview poll
+async function refreshOverview() {
+  const dot = $('#hubDot');
+  const [hs, health] = await Promise.all([api('/api/hotspot/status'), api('/health', {auth:false})]);
+  const on = hs.body?.status?.operational_state === 'on';
+  dot.classList.toggle('on', !!health.body?.ok && on);
+  const st = hs.body?.status || {};
+  $('#hsState').textContent = st.operational_state ?? '?';
+  $('#hsState').className = 'pill ' + (st.operational_state === 'on' ? 'on' : 'off');
+  $('#hsSsid').textContent = st.ssid ?? '—';
+  $('#hsBand').textContent = (st.band ?? '?') + ' · ' + (st.authentication ?? '');
+  $('#hsGw').textContent = st.gateway_ip ?? '—';
+  $('#hsClients').textContent = st.client_count ?? '—';
+  $('#hsShared').textContent = st.shared_profile ?? '—';
+  $('#hubHealth').textContent = health.body?.ok ? 'ok v' + (health.body.version ?? '?') : 'down';
+  $('#hubVersion').textContent = health.body?.version ?? '—';
+  $('#hubEnabled').textContent = String(health.body?.enabled ?? '?');
+}
+setInterval(refreshOverview, 2000);
+
+// hub peer count (best effort)
+async function refreshPeers() {
+  try {
+    const r = await fetch('http://192.168.137.1:9999/api/wgpu/mesh');
+    const d = await r.json();
+    const alive = (d.peers || []).filter(p => p.alive).length;
+    $('#hubPeers').textContent = alive + '/' + (d.peers||[]).length + ' alive';
+  } catch { $('#hubPeers').textContent = 'n/a'; }
+}
+setInterval(refreshPeers, 3000);
+
+$('#btnStart').addEventListener('click', async () => {
+  const out = $('#actionOut'); out.textContent = 'starting…';
+  const r = await api('/api/hotspot/start', { method: 'POST', headers: {'Content-Type':'application/json'}, body: '{}' });
+  out.textContent = JSON.stringify(r.body, null, 2);
+  refreshOverview();
+});
+$('#btnStop').addEventListener('click', async () => {
+  const out = $('#actionOut'); out.textContent = 'stopping…';
+  const r = await api('/api/hotspot/stop', { method: 'POST' });
+  out.textContent = JSON.stringify(r.body, null, 2);
+  refreshOverview();
+});
+$('#btnProbe').addEventListener('click', async () => {
+  const out = $('#actionOut'); out.textContent = 'probing…';
+  const r = await api('/api/probe-hub', { method: 'POST', headers: {'Content-Type':'application/json'}, body: '{}' });
+  out.textContent = JSON.stringify(r.body, null, 2);
+});
+
+// ---------- Adapters
+async function refreshAdapters() {
+  const r = await api('/api/adapters', {auth:false});
+  const rows = (r.body?.adapters || []).map(a =>
+    '<tr><td>' + esc(a.name) + '</td><td>' + esc(a.description || '') + '</td>' +
+    '<td>' + (a.hosted_network ? 'yes' : 'no') + '</td>' +
+    '<td>' + (a.hotspot_via_tethering == null ? '?' : a.hotspot_via_tethering ? 'yes' : 'UNSUPPORTED') + '</td>' +
+    '<td>' + (a.wpa3 ? 'yes' : 'no') + '</td>' +
+    '<td>' + esc((a.bands || []).join(', ')) + '</td></tr>'
+  ).join('');
+  $('#adaptersTable tbody').innerHTML = rows || '<tr><td colspan="6">no adapters</td></tr>';
+}
+
+// ---------- Settings (stage → apply)
+async function loadSettings() {
+  const r = await api('/api/settings', {auth:false});
+  const s = r.body?.settings || {};
+  $('#fEnabled').checked = !!s.enabled;
+  $('#fMode').value = s.preferred_mode || 'lan-client';
+  $('#fAutoStart').checked = !!s.auto_start;
+  $('#fRelease').value = s.auto_release_unreachable_ms ?? 120000;
+  $('#fSsid').value = s.hotspot?.ssid || '';
+  $('#fPass').value = '';
+  $('#fBand').value = s.hotspot?.band || '2.4ghz';
+  $('#fChannel').value = s.hotspot?.channel ?? '';
+  $('#fMaxClients').value = s.hotspot?.max_clients ?? 8;
+  $('#settingsOut').textContent = JSON.stringify(s, null, 2);
+  $('#stageState').textContent = s.staged ? 'staged (not applied)' : 'not staged';
+  $('#stageState').className = 'pill ' + (s.staged ? 'warn' : 'off');
+}
+$('#btnStage').addEventListener('click', async () => {
+  const out = $('#settingsOut');
+  const cur = await api('/api/settings', {auth:false});
+  const s = cur.body?.settings || {};
+  s.enabled = $('#fEnabled').checked;
+  s.preferred_mode = $('#fMode').value;
+  s.auto_start = $('#fAutoStart').checked;
+  s.auto_release_unreachable_ms = Number($('#fRelease').value) || 0;
+  s.hotspot = s.hotspot || {};
+  s.hotspot.ssid = $('#fSsid').value;
+  if ($('#fPass').value) s.hotspot.password = $('#fPass').value; // staged only; applied on Save
+  s.hotspot.band = $('#fBand').value;
+  s.hotspot.channel = $('#fChannel').value === '' ? null : Number($('#fChannel').value);
+  s.hotspot.max_clients = Number($('#fMaxClients').value) || 8;
+  out.textContent = 'staging…';
+  const r = await api('/api/settings/stage', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(s) });
+  out.textContent = JSON.stringify(r.body, null, 2);
+  $('#stageState').textContent = 'staged (not applied)'; $('#stageState').className = 'pill warn';
+});
+$('#btnApply').addEventListener('click', async () => {
+  const out = $('#settingsOut'); out.textContent = 'applying…';
+  const r = await api('/api/settings/apply', { method: 'POST' });
+  out.textContent = JSON.stringify(r.body, null, 2);
+  loadSettings();
+});
+
+// ---------- QR / onboarding
+async function loadJoin() {
+  const box = $('#qrBox'); const out = $('#qrOut');
+  if (!token()) { out.textContent = 'Unlock with token first (header).'; return; }
+  const r = await api('/api/join');
+  if (!r.ok) { out.textContent = 'join endpoint: ' + (r.body?.error || r.status); return; }
+  box.innerHTML =
+    '<figure>' + (r.body.wifi_svg || '') + '<figcaption>1) Wi-Fi (' + esc(r.body.ssid) + ')</figcaption></figure>' +
+    '<figure>' + (r.body.mesh_svg || '') + '<figcaption>2) mesh page</figcaption></figure>';
+  out.textContent = 'mesh_url: ' + r.body.mesh_url + ' · gateway: ' + r.body.gateway;
+}
+
+// ---------- Logs (SSE)
+function startLogs() {
+  const el = $('#log'); const st = $('#logState');
+  try {
+    const es = new EventSource('/api/logs');
+    es.onopen = () => { st.textContent = 'connected'; };
+    es.onmessage = (ev) => {
+      try {
+        const msg = JSON.parse(ev.data);
+        if (msg.type === 'heartbeat') { st.textContent = 'connected · ' + new Date().toLocaleTimeString(); return; }
+        for (const e of (msg.entries || [])) {
+          const line = document.createElement('div');
+          line.className = 'log-line ' + (e.level || 'info');
+          line.innerHTML = '<span class="ts">' + new Date((e.ts||0)*1000).toLocaleTimeString() + '</span><span class="msg">' + esc(e.msg) + '</span>';
+          el.prepend(line);
+          while (el.children.length > 150) el.removeChild(el.lastChild);
+        }
+      } catch (e) { /* keep stream */ }
+    };
+    es.onerror = () => { st.textContent = 'reconnecting…'; };
+  } catch (e) { st.textContent = 'SSE unsupported'; }
+}
+$('#btnClearLog').addEventListener('click', () => { $('#log').innerHTML = ''; });
+
+// init
+renderLock();
+refreshOverview();
+refreshPeers();
+refreshAdapters();
+loadSettings();
+loadJoin();
+startLogs();
 </script>
 </body>
 </html>

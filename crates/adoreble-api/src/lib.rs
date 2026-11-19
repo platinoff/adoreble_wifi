@@ -13,17 +13,21 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use adoreble_core::{AdapterCapabilities, HubProbeResult, Settings};
-use axum::http::Request;
 use axum::{
     Json, Router,
     body::Body,
-    extract::State,
+    extract::{Request, State},
     http::{HeaderValue, StatusCode},
     middleware,
-    response::{IntoResponse, Response},
+    response::{
+        Html, IntoResponse, Response,
+        sse::{Event, Sse},
+    },
     routing::{get, post},
 };
 use serde_json::json;
+use std::collections::VecDeque;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 /// Shared application state.
 #[derive(Clone)]
@@ -31,6 +35,41 @@ pub struct AppState {
     pub settings: Arc<Mutex<Settings>>,
     pub token: Arc<String>,
     pub data_dir: PathBuf,
+    pub log_ring: Arc<Mutex<VecDeque<LogEntry>>>,
+    pub log_seq: Arc<AtomicU64>,
+}
+
+/// One operational event for the /api/logs SSE stream (redacted).
+#[derive(Clone, serde::Serialize)]
+pub struct LogEntry {
+    pub seq: u64,
+    pub ts: u64,
+    pub level: String,
+    pub msg: String,
+}
+
+pub const LOG_RING_CAP: usize = 200;
+
+fn now_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+/// Push one operational event to the ring (best-effort; never panics).
+pub fn push_log(state: &AppState, level: &str, msg: impl Into<String>) {
+    let seq = state.log_seq.fetch_add(1, Ordering::SeqCst) + 1;
+    let mut ring = state.log_ring.lock().unwrap();
+    if ring.len() >= LOG_RING_CAP {
+        ring.pop_front();
+    }
+    ring.push_back(LogEntry {
+        seq,
+        ts: now_secs(),
+        level: level.to_string(),
+        msg: msg.into(),
+    });
 }
 
 /// Load an existing token, or create one (hex, 32 bytes).
@@ -71,6 +110,9 @@ pub fn router(state: AppState) -> Router {
         .route("/api/hotspot/status", get(hotspot_status))
         .route("/api/hotspot/start", post(hotspot_start))
         .route("/api/hotspot/stop", post(hotspot_stop))
+        .route("/ui", get(ui_page))
+        .route("/api/join", get(join_svgs))
+        .route("/api/logs", get(logs_stream))
         .layer(middleware::from_fn_with_state(state.clone(), token_gate))
         .with_state(state)
 }
@@ -151,6 +193,7 @@ async fn stage_settings(State(state): State<AppState>, Json(payload): Json<Setti
     let mut s = state.settings.lock().unwrap();
     *s = payload;
     s.staged = true;
+    push_log(&state, "info", "settings staged in memory (not persisted)");
     (StatusCode::OK, Json(json!({"ok": true, "staged": true}))).into_response()
 }
 
@@ -199,6 +242,7 @@ async fn apply_settings(State(state): State<AppState>) -> Response {
         )
             .into_response();
     }
+    push_log(&state, "info", "settings applied (persisted)");
     (
         StatusCode::OK,
         Json(json!({"ok": true, "applied": true, "path": path})),
@@ -269,6 +313,12 @@ async fn probe_hub(
             })
             .collect(),
     };
+    let ok_count = results.iter().filter(|r| r.ok).count();
+    push_log(
+        &state,
+        "info",
+        format!("probe-hub: {ok_count}/{} ok", results.len()),
+    );
     Json(json!({"ok": true, "results": results}))
 }
 
@@ -328,15 +378,34 @@ async fn hotspot_start(
         )
             .into_response();
     }
+    push_log(
+        &state,
+        "info",
+        "hotspot secrets staged+persisted; starting…",
+    );
     #[cfg(windows)]
     {
         match adoreble_windows::hotspot_start(&ssid, &passphrase) {
-            Ok(status) => Json(json!({"ok": true, "status": status})).into_response(),
-            Err(e) => (
-                StatusCode::BAD_GATEWAY,
-                Json(json!({"ok": false, "error": e})),
-            )
-                .into_response(),
+            Ok(status) => {
+                push_log(
+                    &state,
+                    "info",
+                    format!(
+                        "hotspot started · {} · clients {}",
+                        status.operational_state,
+                        status.client_count.unwrap_or(0)
+                    ),
+                );
+                Json(json!({"ok": true, "status": status})).into_response()
+            }
+            Err(e) => {
+                push_log(&state, "warn", format!("hotspot start failed: {e}"));
+                (
+                    StatusCode::BAD_GATEWAY,
+                    Json(json!({"ok": false, "error": e})),
+                )
+                    .into_response()
+            }
         }
     }
     #[cfg(not(windows))]
@@ -351,16 +420,26 @@ async fn hotspot_start(
 }
 
 /// Stop Mobile Hotspot (token-required POST). STA profile untouched.
-async fn hotspot_stop() -> Response {
+async fn hotspot_stop(State(state): State<AppState>) -> Response {
     #[cfg(windows)]
     {
         match adoreble_windows::hotspot_stop() {
-            Ok(status) => Json(json!({"ok": true, "status": status})).into_response(),
-            Err(e) => (
-                StatusCode::BAD_GATEWAY,
-                Json(json!({"ok": false, "error": e})),
-            )
-                .into_response(),
+            Ok(status) => {
+                push_log(
+                    &state,
+                    "info",
+                    format!("hotspot stopped · {}", status.operational_state),
+                );
+                Json(json!({"ok": true, "status": status})).into_response()
+            }
+            Err(e) => {
+                push_log(&state, "warn", format!("hotspot stop failed: {e}"));
+                (
+                    StatusCode::BAD_GATEWAY,
+                    Json(json!({"ok": false, "error": e})),
+                )
+                    .into_response()
+            }
         }
     }
     #[cfg(not(windows))]
@@ -371,6 +450,108 @@ async fn hotspot_stop() -> Response {
         )
             .into_response()
     }
+}
+
+/// The single-page ADO UI (served at `/ui`).
+async fn ui_page() -> Html<&'static str> {
+    Html(include_str!("../ui/static/index.html"))
+}
+
+/// `GET /api/join` — QR payloads for onboarding. Token-gated (this route is a
+/// GET, so the middleware does not cover it). Never returns the passphrase.
+async fn join_svgs(State(state): State<AppState>, req: Request) -> Response {
+    let ok = req
+        .headers()
+        .get("x-adoreble-token")
+        .and_then(|v| v.to_str().ok())
+        .map(|t| t == *state.token)
+        .unwrap_or(false);
+    if !ok {
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(json!({"ok": false, "error": "missing or invalid token"})),
+        )
+            .into_response();
+    }
+    let path = state.data_dir.join("adoreble.json");
+    let settings = match adoreble_core::load_settings(&path) {
+        Ok(s) => s,
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"ok": false, "error": e})),
+            )
+                .into_response();
+        }
+    };
+    let ssid = settings.hotspot.ssid.clone();
+    let passphrase = settings.hotspot.password.clone();
+    if ssid.is_empty() || passphrase.is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"ok": false, "error": "no hotspot secrets yet — start the hotspot first"})),
+        )
+            .into_response();
+    }
+    #[cfg(windows)]
+    let gateway =
+        adoreble_windows::detect_gateway_ip().unwrap_or_else(|| "192.168.137.1".to_string());
+    #[cfg(not(windows))]
+    let gateway = "192.168.137.1".to_string();
+    let mesh_url = adoreble_core::mesh_url(&gateway);
+    let wifi_svg = qrcode::QrCode::new(adoreble_core::wpa_qr_payload(&ssid, &passphrase))
+        .map(|q| {
+            q.render::<qrcode::render::svg::Color>()
+                .min_dimensions(220, 220)
+                .quiet_zone(true)
+                .build()
+        })
+        .unwrap_or_default();
+    let mesh_svg = qrcode::QrCode::new(&mesh_url)
+        .map(|q| {
+            q.render::<qrcode::render::svg::Color>()
+                .min_dimensions(220, 220)
+                .quiet_zone(true)
+                .build()
+        })
+        .unwrap_or_default();
+    Json(serde_json::json!({
+        "ok": true,
+        "ssid": ssid,
+        "gateway": gateway,
+        "mesh_url": mesh_url,
+        "wifi_svg": wifi_svg,
+        "mesh_svg": mesh_svg,
+    }))
+    .into_response()
+}
+
+/// `GET /api/logs` — SSE stream of operational events (redacted).
+async fn logs_stream(
+    State(state): State<AppState>,
+) -> Sse<impl futures::Stream<Item = Result<Event, std::convert::Infallible>>> {
+    let stream = futures::stream::unfold((state, 0u64), |(state, last)| async move {
+        tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
+        let seq = state.log_seq.load(Ordering::SeqCst);
+        if seq == last {
+            let payload = serde_json::json!({"type": "heartbeat", "ts": now_secs()});
+            return Some((
+                Ok(Event::default().data(payload.to_string())),
+                (state, last),
+            ));
+        }
+        let entries: Vec<LogEntry> = {
+            let ring = state.log_ring.lock().unwrap();
+            ring.iter().filter(|e| e.seq > last).cloned().collect()
+        };
+        let new_last = seq;
+        let payload = serde_json::json!({"type": "logs", "entries": entries});
+        Some((
+            Ok(Event::default().data(payload.to_string())),
+            (state, new_last),
+        ))
+    });
+    Sse::new(stream)
 }
 
 /// Default data directory: `data/` under CWD (gitignored in this repo).
@@ -384,18 +565,26 @@ pub fn default_data_dir() -> PathBuf {
 mod tests {
     use super::*;
     use axum::http::{Request, header};
+    use std::collections::VecDeque;
     use std::sync::Arc;
+    use std::sync::atomic::AtomicU64;
     use tower::ServiceExt;
+
+    fn test_state(token: &str, dir: std::path::PathBuf) -> AppState {
+        let _ = std::fs::create_dir_all(&dir);
+        AppState {
+            settings: Arc::new(Mutex::new(Settings::default())),
+            token: Arc::new(token.to_string()),
+            data_dir: dir,
+            log_ring: Arc::new(Mutex::new(VecDeque::new())),
+            log_seq: Arc::new(AtomicU64::new(0)),
+        }
+    }
 
     #[tokio::test]
     async fn health_reports_disabled_by_default() {
         let dir = std::env::temp_dir().join("adoreble_test_health");
-        let _ = std::fs::create_dir_all(&dir);
-        let state = AppState {
-            settings: Arc::new(Mutex::new(Settings::default())),
-            token: Arc::new("test-token".to_string()),
-            data_dir: dir,
-        };
+        let state = test_state("test-token", dir);
         let app = router(state);
         let resp = app
             .oneshot(
@@ -412,12 +601,7 @@ mod tests {
     #[tokio::test]
     async fn stage_requires_token() {
         let dir = std::env::temp_dir().join("adoreble_test_stage");
-        let _ = std::fs::create_dir_all(&dir);
-        let state = AppState {
-            settings: Arc::new(Mutex::new(Settings::default())),
-            token: Arc::new("secret".to_string()),
-            data_dir: dir,
-        };
+        let state = test_state("secret", dir);
         let app = router(state);
         let body = serde_json::to_vec(&Settings::default()).unwrap();
         let resp = app
@@ -432,5 +616,103 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn ui_page_serves_shell_markers() {
+        let dir = std::env::temp_dir().join("adoreble_test_ui");
+        let state = test_state("test-token", dir);
+        let app = router(state);
+        let resp = app
+            .oneshot(Request::builder().uri("/ui").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let text = String::from_utf8_lossy(&body);
+        assert!(text.contains("Adoreble Wi-Fi"), "UI shell marker missing");
+        assert!(text.contains("127.0.0.1:9770"), "UI shell marker missing");
+    }
+
+    #[tokio::test]
+    async fn join_requires_token_and_never_leaks_passphrase() {
+        let dir = std::env::temp_dir().join("adoreble_test_join");
+        let mut settings = Settings::default();
+        settings.hotspot.ssid = "GSV-Peers-7777".to_string();
+        settings.hotspot.password = "topsecret-passphrase".to_string();
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("adoreble.json"),
+            serde_json::to_vec_pretty(&settings).unwrap(),
+        )
+        .unwrap();
+
+        let state = test_state("right-token", dir);
+        let app = router(state);
+
+        // Without token → 401.
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/join")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+
+        // With token → 200, SVGs present, passphrase NOT in the wire payload.
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/join")
+                    .header("x-adoreble-token", "right-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let text = String::from_utf8_lossy(&body);
+        assert!(
+            text.contains("GSV-Peers-7777"),
+            "ssid missing from join wire"
+        );
+        assert!(text.contains("<svg"), "wifi QR svg missing");
+        assert!(
+            !text.contains("topsecret-passphrase"),
+            "passphrase leaked into JSON"
+        );
+    }
+
+    #[tokio::test]
+    async fn logs_stream_declares_event_stream() {
+        let dir = std::env::temp_dir().join("adoreble_test_logs");
+        let state = test_state("test-token", dir);
+        let app = router(state);
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/logs")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let ct = resp
+            .headers()
+            .get(header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("")
+            .to_string();
+        assert!(ct.contains("text/event-stream"), "content-type: {ct}");
     }
 }
