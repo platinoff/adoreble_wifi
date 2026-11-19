@@ -12,7 +12,9 @@ use std::io::Write as IoWrite;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
-use adoreble_core::{AdapterCapabilities, HubProbeResult, Settings};
+use adoreble_core::{
+    AdapterCapabilities, HubProbeResult, ReleaseAction, Settings, evaluate_release,
+};
 use axum::{
     Json, Router,
     body::Body,
@@ -552,6 +554,93 @@ async fn logs_stream(
         ))
     });
     Sse::new(stream)
+}
+
+/// ADO-6: SLA watchdog — probe the GSV hub; on sustained unavailability,
+/// stop the hotspot and reconnect the STA profile (`release_ssid`).
+/// Never panics; logs via the operational ring. Fires at most once per
+/// cooldown window.
+pub fn spawn_watchdog(state: AppState) {
+    tokio::spawn(async move {
+        const INTERVAL: std::time::Duration = std::time::Duration::from_secs(30);
+        let mut consec: u32 = 0;
+        let mut first_fail: Option<std::time::Instant> = None;
+        let mut cooldown_until: Option<std::time::Instant> = None;
+        loop {
+            tokio::time::sleep(INTERVAL).await;
+            if let Some(c) = cooldown_until {
+                if std::time::Instant::now() < c {
+                    continue;
+                }
+                cooldown_until = None;
+            }
+            let threshold = {
+                let s = state.settings.lock().unwrap();
+                s.auto_release_unreachable_ms
+            };
+            if threshold == 0 {
+                continue;
+            }
+            let urls = {
+                let s = state.settings.lock().unwrap();
+                s.gsv_hub_candidates.clone()
+            };
+            let mut ok = false;
+            if let Ok(client) = reqwest::Client::builder()
+                .timeout(std::time::Duration::from_secs(2))
+                .build()
+            {
+                for url in &urls {
+                    match client.get(url).send().await {
+                        Ok(resp) if resp.status().is_success() => {
+                            ok = true;
+                            break;
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            if ok {
+                consec = 0;
+                first_fail = None;
+                continue;
+            }
+            consec += 1;
+            if first_fail.is_none() {
+                first_fail = Some(std::time::Instant::now());
+            }
+            let unreachable_ms = first_fail
+                .map(|t| t.elapsed().as_millis() as u64)
+                .unwrap_or(0);
+            if evaluate_release(consec, unreachable_ms, threshold) != ReleaseAction::Release {
+                continue;
+            }
+            push_log(
+                &state,
+                "warn",
+                "SLA: GSV hub unreachable — auto-release (stop hotspot, reconnect STA)",
+            );
+            #[cfg(windows)]
+            {
+                let _ = adoreble_windows::hotspot_stop();
+                use std::os::windows::process::CommandExt;
+                const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+                let ssid = {
+                    let s = state.settings.lock().unwrap();
+                    s.release_ssid.clone()
+                };
+                let _ = std::process::Command::new("netsh")
+                    .creation_flags(CREATE_NO_WINDOW)
+                    .args(["wlan", "connect", &format!("name={ssid}")])
+                    .stdout(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::null())
+                    .status();
+            }
+            consec = 0;
+            first_fail = None;
+            cooldown_until = Some(std::time::Instant::now() + std::time::Duration::from_secs(600));
+        }
+    });
 }
 
 /// Default data directory: `data/` under CWD (gitignored in this repo).

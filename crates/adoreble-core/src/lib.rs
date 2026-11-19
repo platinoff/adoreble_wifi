@@ -84,10 +84,17 @@ pub struct Settings {
     /// GSV hub health-probe candidates, tried in order.
     #[serde(default = "default_candidates")]
     pub gsv_hub_candidates: Vec<String>,
+    /// STA profile to reconnect to after SLA auto-release.
+    #[serde(default = "default_release_ssid")]
+    pub release_ssid: String,
 }
 
 fn default_candidates() -> Vec<String> {
     default_hub_candidates()
+}
+
+fn default_release_ssid() -> String {
+    "BELL409".to_string()
 }
 
 impl Default for Settings {
@@ -107,6 +114,7 @@ impl Default for Settings {
             auto_release_unreachable_ms: 120_000,
             staged: false,
             gsv_hub_candidates: default_hub_candidates(),
+            release_ssid: default_release_ssid(),
         }
     }
 }
