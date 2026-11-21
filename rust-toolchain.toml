@@ -1,6 +1,5 @@
-# Ecosystem toolchain policy (owner 2026-11-04): stay on the latest stable rust,
-# gnu triple (MSYS2 builds). Floats with stable: 1.99.1 → 1.100 → …
+# Stay on latest stable Rust (floats with stable). Host-agnostic channel so
+# cross-platform CI (ubuntu-latest + windows-latest/msvc) stays green.
 [toolchain]
-channel = "stable-x86_64-pc-windows-gnu"
-targets = ["x86_64-pc-windows-gnu"]
+channel = "stable"
 components = ["rustfmt", "clippy"]
