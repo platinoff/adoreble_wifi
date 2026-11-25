@@ -1,8 +1,23 @@
 //! `cargo xtask verify` — fmt + clippy + workspace test (ADO-0).
 //! `cargo xtask autostart install|uninstall|status` — ADO-6 (GSV-watchdog pattern).
+//! `cargo xtask watch` — silent Rust watcher (replaces the old WSH/VBS launcher).
+//!
+//! Owner rule (2026-11-25): no WScript popup windows in a web-oriented
+//! ecosystem. The watcher logs failures to `data/adoreble-watchdog.log` so
+//! agents/models can read and fix them; it never shows a system dialog.
 
+use std::io::{Read, Write};
+use std::net::TcpStream;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode, Stdio};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+#[cfg(windows)]
+use std::os::windows::process::CommandExt;
+
+/// CREATE_NO_WINDOW — no console flash from the respawned API.
+#[cfg(windows)]
+const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
 fn run(cmd: &str, args: &[&str]) {
     let status = Command::new(cmd)
@@ -21,7 +36,9 @@ fn repo_root() -> PathBuf {
     std::env::current_dir().expect("cwd")
 }
 
-fn vbs_path(root: &Path) -> PathBuf {
+/// Legacy VBS launcher, kept only so `uninstall` can remove files created by
+/// older versions. New installs never write or execute a VBS file.
+fn legacy_vbs_path(root: &Path) -> PathBuf {
     root.join("scripts").join("adoreble-watch.vbs")
 }
 
@@ -42,32 +59,87 @@ fn win_path(p: &Path) -> String {
     p.to_string_lossy().replace('/', "\\")
 }
 
-fn vbs_body(exe: &Path, root: &Path) -> String {
-    let exe = win_path(exe);
-    let root = win_path(root);
-    format!(
-        "Set fso = CreateObject(\"Scripting.FileSystemObject\")\n\
-Set sh = CreateObject(\"WScript.Shell\")\n\
-exe = \"{exe}\"\n\
-root = \"{root}\"\n\
-log = root & \"\\data\\adoreble-watchdog.log\"\n\
-Do\n\
-  On Error Resume Next\n\
-  Set http = CreateObject(\"WinHttp.WinHttpRequest.5.1\")\n\
-  http.Open \"GET\", \"http://127.0.0.1:9770/health\", False\n\
-  http.SetTimeouts 1500, 1500, 1500, 1500\n\
-  http.Send\n\
-  code = 0\n\
-  If Not Err.Number = 0 Then code = 0 Else code = http.Status\n\
-  Err.Clear\n\
-  If code <> 200 Then\n\
-    sh.Run \"\"\"\" & exe & \"\"\"\", 0, False\n\
-    WScript.Sleep 10000\n\
-  Else\n\
-    WScript.Sleep 15000\n\
-  End If\n\
-Loop\n"
-    )
+fn watcher_exe() -> PathBuf {
+    std::env::current_exe()
+        .unwrap_or_else(|_| PathBuf::from("S:\\rust\\adoreble_wifi\\target\\debug\\xtask.exe"))
+}
+
+fn log_line(root: &Path, msg: &str) {
+    let path = root.join("data").join("adoreble-watchdog.log");
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let secs = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+    {
+        let _ = writeln!(f, "{secs} {msg}");
+    }
+}
+
+/// Read the first HTTP response bytes; `200` only on a well-formed status line.
+fn status_ok(head: &[u8]) -> bool {
+    head.starts_with(b"HTTP/1.1 200") || head.starts_with(b"HTTP/1.0 200")
+}
+
+fn health_ok() -> bool {
+    let addr = match "127.0.0.1:9770".parse() {
+        Ok(a) => a,
+        Err(_) => return false,
+    };
+    let Ok(mut stream) = TcpStream::connect_timeout(&addr, Duration::from_millis(1500)) else {
+        return false;
+    };
+    let _ = stream.set_read_timeout(Some(Duration::from_millis(1500)));
+    let _ = stream.set_write_timeout(Some(Duration::from_millis(1500)));
+    if stream
+        .write_all(b"GET /health HTTP/1.1\r\nHost: 127.0.0.1:9770\r\nConnection: close\r\n\r\n")
+        .is_err()
+    {
+        return false;
+    }
+    let mut head = [0u8; 64];
+    match stream.read(&mut head) {
+        Ok(n) => status_ok(&head[..n]),
+        Err(_) => false,
+    }
+}
+
+fn spawn_hidden(exe: &Path) {
+    let mut cmd = Command::new(exe);
+    cmd.stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    #[cfg(windows)]
+    cmd.creation_flags(CREATE_NO_WINDOW);
+    match cmd.spawn() {
+        Ok(_) => (),
+        Err(e) => eprintln!("adoreble-watch: spawn {} failed: {e}", exe.display()),
+    }
+}
+
+/// Silent loop: probe the loopback API, respawn it when down, log everything.
+fn watch() -> ExitCode {
+    let root = repo_root();
+    let Some(exe) = pick_api_exe(&root) else {
+        log_line(&root, "watch: adoreble-api.exe not found; watcher stopped");
+        return ExitCode::FAILURE;
+    };
+    log_line(&root, &format!("watch: start exe={}", win_path(&exe)));
+    loop {
+        if health_ok() {
+            std::thread::sleep(Duration::from_secs(15));
+        } else {
+            log_line(&root, "health != 200; respawn adoreble-api");
+            spawn_hidden(&exe);
+            std::thread::sleep(Duration::from_secs(10));
+        }
+    }
 }
 
 fn try_schtasks(tr: &str) -> bool {
@@ -113,23 +185,15 @@ fn autostart(verb: &str) -> ExitCode {
     let root = repo_root();
     match verb {
         "install" => {
-            let Some(exe) = pick_api_exe(&root) else {
-                eprintln!(
-                    "adoreble-xtask autostart: adoreble-api.exe not found (target/release or target/debug)"
-                );
-                return ExitCode::FAILURE;
-            };
-            let _ = std::fs::create_dir_all(root.join("scripts"));
-            let vbs = vbs_path(&root);
-            if let Err(e) = std::fs::write(&vbs, vbs_body(&exe, &root)) {
-                eprintln!("adoreble-xtask autostart: write {}: {e}", vbs.display());
-                return ExitCode::FAILURE;
+            // No VBS / WScript: launch the Rust watcher directly, hidden.
+            let exe = watcher_exe();
+            let tr = format!("\"{}\" watch", win_path(&exe));
+            // Remove any legacy WSH launcher left by older versions.
+            let legacy = legacy_vbs_path(&root);
+            if legacy.is_file() {
+                let _ = std::fs::remove_file(&legacy);
+                log_line(&root, "autostart: removed legacy VBS launcher");
             }
-            let wscript = r"C:\Windows\System32\wscript.exe";
-            let tr = format!(
-                "\"{wscript}\" \"{}\"",
-                vbs.to_string_lossy().replace('/', "\\")
-            );
             if try_schtasks(&tr) {
                 println!("adoreble-autostart: schtasks AdorebleWiFi (ONLOGON)\nTR={tr}");
                 return ExitCode::SUCCESS;
@@ -138,6 +202,10 @@ fn autostart(verb: &str) -> ExitCode {
                 println!("adoreble-autostart: HKCU Run AdorebleWiFi\nTR={tr}");
                 return ExitCode::SUCCESS;
             }
+            log_line(
+                &root,
+                "autostart: could not persist (need schtasks or reg.exe)",
+            );
             eprintln!("adoreble-autostart: could not persist (need schtasks or reg.exe)");
             ExitCode::FAILURE
         }
@@ -160,8 +228,10 @@ fn autostart(verb: &str) -> ExitCode {
                 .stdout(Stdio::null())
                 .stderr(Stdio::null())
                 .status();
-            let _ = std::fs::remove_file(vbs_path(&root));
-            println!("adoreble-autostart: uninstalled (task + Run key removed; vbs removed)");
+            let _ = std::fs::remove_file(legacy_vbs_path(&root));
+            println!(
+                "adoreble-autostart: uninstalled (task + Run key removed; legacy VBS removed)"
+            );
             ExitCode::SUCCESS
         }
         "status" => {
@@ -231,12 +301,27 @@ fn main() -> ExitCode {
             println!("verify: ok");
             ExitCode::SUCCESS
         }
+        "watch" => watch(),
         "autostart" => autostart(std::env::args().nth(2).as_deref().unwrap_or("status")),
         _ => {
             eprintln!(
-                "unknown xtask task: {cmd} (expected: verify | autostart install|uninstall|status)"
+                "unknown xtask task: {cmd} (expected: verify | watch | autostart install|uninstall|status)"
             );
             ExitCode::FAILURE
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn http_status_parser_accepts_only_200() {
+        assert!(status_ok(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\n"));
+        assert!(status_ok(b"HTTP/1.0 200 OK\r\n\r\n"));
+        assert!(!status_ok(b"HTTP/1.1 500 Internal Server Error\r\n\r\n"));
+        assert!(!status_ok(b"garbage"));
+        assert!(!status_ok(b""));
     }
 }

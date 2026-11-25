@@ -12,6 +12,12 @@
 - **Loopback only** (`127.0.0.1:9770`); token-authenticated POSTs; read-only on the wire by default.
 - **Rust 1.100 workspace**, Windows-first (`ADO-0..ADO-3` on `Intel AC-8265` host), Linux/Pi4 backend for `Bridge` mode.
 - **Fail-open**: any SLA drop ⇒ revert to the last-known-good profile.
+- **Silent Rust watcher** (`cargo run -p adoreble-xtask --bin xtask -- watch`): the
+  legacy `adoreble-watch.vbs` / WScript launcher is gone (VBScript reserved-word
+  error `800A01F5` popped a Windows dialog on logon). Autostart now registers
+  `xtask.exe watch` directly; probe/respawn failures go to
+  `data/adoreble-watchdog.log` (gitignored) so agents/models can read and fix
+  them, and no system window appears.
 - **Settings staged in memory, applied on Save** — never live-mutated.
 - **Secrets never persisted** in a committed file; runtime reads via the host
   (`netsh wlan show profile ... key=clear` on Windows) and are redacted in every
