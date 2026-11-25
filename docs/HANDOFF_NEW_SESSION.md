@@ -1,6 +1,8 @@
 # adoreble_wifi — HANDOFF_NEW_SESSION
 
-## Сталий стан (2026-11-18 — ADO-3 Hotspot LIVE)
+## Сталий стан (2026-11-25 — ADO-3 Hotspot LIVE; WSH/VBS вотчер замінено на Rust)
+
+| **Silent watcher 2026-11-25 (`e738362`)** | `scripts/adoreble-watch.vbs` видалено: після ребуту WSH показував діалог `Illegal assignment: 'log'` (800A01F5, рядок 5 — `Log` зарезервоване в VBScript). `adoreble-xtask watch` тепер сам пробує `127.0.0.1:9770/health`, при потребі тихо респавнить `adoreble-api.exe` (`CREATE_NO_WINDOW`) і пише в `data/adoreble-watchdog.log` (gitignored). HKCU Run `AdorebleWiFi` → `"...\xtask.exe" watch`; жодних системних вікон. `cargo xtask verify` green. |
 
 | Що | Значення |
 |---|---|
