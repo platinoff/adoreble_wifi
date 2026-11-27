@@ -1,9 +1,10 @@
 # adoreble_wifi — HANDOFF_NEW_SESSION
 
-## Сталий стан (2026-11-25 — ADO-3 Hotspot LIVE; WSH/VBS вотчер замінено на Rust)
+## Сталий стан (2026-11-27 — HEAD `eb471e3` clean/pushed; ADO-3 Hotspot LIVE; WSH/VBS вотчер замінено на Rust; ADO-5 phase 1 додано)
 
 | **Silent watcher 2026-11-25 (`e738362`)** | `scripts/adoreble-watch.vbs` видалено: після ребуту WSH показував діалог `Illegal assignment: 'log'` (800A01F5, рядок 5 — `Log` зарезервоване в VBScript). `adoreble-xtask watch` тепер сам пробує `127.0.0.1:9770/health`, при потребі тихо респавнить `adoreble-api.exe` (`CREATE_NO_WINDOW`) і пише в `data/adoreble-watchdog.log` (gitignored). HKCU Run `AdorebleWiFi` → `"...\xtask.exe" watch`; жодних системних вікон. `cargo xtask verify` green. |
 
+| **ADO-5 phase 1 (2026-11-27, `eb471e3`)** | `crates/adoreble-linux/src/lib.rs`: read-only sysfs Wi-Fi probe — чистий `probe_from_net_dir(&Path)` знаходить `/sys/class/net/<if>` з маркером `wireless/`/`phy80211`, читає `operstate`; Linux `probe()` викликає його, інші хости лишаються порожніми. Невідомі можливості чесно `false`/`None`/порожньо (guid None, bands [], hosted_network false, wpa3 false). TDD: синтетичне sysfs-дерево в `target/` (wlan0 знайдено, eth0 пропущено, missing dir → порожньо) — 3 тести green. Гейти: fmt/clippy `-D warnings` RC=0, `cargo test` EXIT=0 (локально gnu-toolchain; CI без змін). **AP через `nl80211`/`hostapd` (phase 2) не робився — owner-gated системні зміни.** |
 | Що | Значення |
 |---|---|
 | Repo | `S:/rust/adoreble_wifi` → `github.com/platinoff/adoreble_wifi` (**MIT, public**, owner 2026-11-18) |
